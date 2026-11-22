@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The orchestrator as a launchd daemon on the Mac mini: started at boot,
+  restarted when it exits, run as the `factory` user. Install it with the
+  steps in docs/deploying.md; replace REPLACE_WITH_APP_ID first.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.factory.orchestrator</string>
+
+    <key>UserName</key>
+    <string>factory</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/factory</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/factory/swfactory/orchestrator/.venv/bin/factory</string>
+        <string>serve</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/factory</string>
+        <!-- launchd's default PATH has neither Homebrew nor ~/.local/bin; the
+             orchestrator runs `git` and `claude` (to read usage). -->
+        <key>PATH</key>
+        <string>/Users/factory/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>FACTORY_APP_ID</key>
+        <string>REPLACE_WITH_APP_ID</string>
+        <key>FACTORY_APP_KEY_FILE</key>
+        <string>/Users/factory/.factory/app-key.pem</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Wait 30 seconds between restarts, so a crash loop doesn't spin. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Catches anything printed before the orchestrator's own log starts,
+         such as a crash at import or a missing env var. -->
+    <key>StandardOutPath</key>
+    <string>/Users/factory/.factory/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/factory/.factory/launchd.log</string>
+</dict>
+</plist>
