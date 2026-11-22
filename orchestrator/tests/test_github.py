@@ -133,3 +133,30 @@ def test_an_error_answer_raises_with_its_status(github, fake):
         github.get_issue("octo/widgets", 99)
 
     assert e.value.status == 404
+
+
+def test_graphql_errors_in_a_200_answer_are_raised(github, fake):
+    # GraphQL answers errors with 200; the token is for octo/widgets, the PR in octo/gadgets.
+    fake.add_pull("octo/gadgets", 3, "Tidy", "alice/tidy")
+
+    with pytest.raises(GitHubError, match="Could not resolve"):
+        github.graphql("octo/widgets", "query ClosingIssues { x }",
+                       {"owner": "octo", "name": "gadgets", "number": 3})
+
+
+def test_a_review_request_github_refuses_is_reported_not_raised(github, fake):
+    fake.repos["octo/widgets"].permissions["alice"] = "write"
+    pr = fake.add_pull("octo/widgets", 3, "Tidy", "alice/tidy", author="alice")
+
+    assert github.request_review("octo/widgets", 3, "alice") is False  # its own author
+    assert github.request_review("octo/widgets", 3, "nobody") is False  # not a collaborator
+    assert pr["requested_reviewers"] == []
+
+
+def test_marking_a_pr_ready_takes_it_out_of_draft_and_a_ready_one_stays_ready(github, fake):
+    pr = fake.add_pull("octo/widgets", 3, "Tidy", "factory/1-2", draft=True)
+
+    github.mark_ready("octo/widgets", 3)
+    github.mark_ready("octo/widgets", 3)
+
+    assert pr["draft"] is False

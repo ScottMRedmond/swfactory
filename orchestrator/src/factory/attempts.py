@@ -19,7 +19,7 @@ import logging
 import sqlite3
 from typing import Any
 
-from factory import loop
+from factory import loop, review
 from factory import state as db_state
 from factory.logs import about_run
 
@@ -43,8 +43,10 @@ def failure(run: sqlite3.Row) -> str | None:
 
 
 def is_bad(run: sqlite3.Row) -> bool:
-    """The run ended badly and counts as an attempt."""
-    return run["outcome"] in BAD and failure(run) not in NOT_ATTEMPTS
+    """The run ended badly and counts as an attempt. A review whose fixes
+    failed the check isn't: its findings are posted, not retried."""
+    return (run["outcome"] in BAD and failure(run) not in NOT_ATTEMPTS
+            and not review.output_used(run))
 
 
 def not_an_attempt(conn: sqlite3.Connection, run: sqlite3.Row) -> bool:

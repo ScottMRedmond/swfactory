@@ -1,13 +1,15 @@
 """The implement-ticket workflow: explore -> implement -> review, for one ticket
 and one PR (orchestrator.md#implement-ticket).
 
-A human starts it with `agent:explore` (later tickets add joining it with
-`agent:implement` or `agent:review`). Explore's verdict decides what happens
+A human starts it with `agent:explore`, or reviews its PR again with
+`agent:review` (joining it with `agent:implement` is a later ticket's). Explore's verdict decides what happens
 next (orchestrator.md#explore): `easy-call` queues implement; the others stop
 the workflow. Implement starts from the default branch's head at dispatch
 time; `built` pushes its checked bundle to `factory/<ticket>-<run id>` and
 opens a draft PR, `needs-a-human` pushes nothing and stops the workflow
-(orchestrator.md#implement).
+(orchestrator.md#implement). `built` also queues review of the PR, whose
+fixes are pushed without force before one verdict comment is posted and the
+PR marked ready (orchestrator.md#review).
 """
 
 import json
@@ -15,13 +17,14 @@ import logging
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from factory import attempts, bundles, loop, tickets
+from factory import attempts, bundles, loop, review, tickets
 from factory import enrolment as enrolments
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub
+from factory.runner import Runner
 from factory.logs import about_run
 from factory.workflows import base
 from factory.workflows.base import Context
@@ -77,12 +80,57 @@ def start_explore(
     return run_id
 
 
+def start_review(
+    conn: sqlite3.Connection,
+    github: GitHub,
+    settings: "Settings",
+    pr: dict[str, Any],
+    enrolment: Enrolment,
+    triggered_by: "Added | None",
+) -> bool:
+    """A human added `agent:review` to a PR: if the factory opened it for a
+    ticket, review it again in that ticket's workflow (reactivated), against
+    the ticket. False, doing nothing, for any other PR."""
+    repo, number = enrolment.repo, pr["number"]
+    workflow = conn.execute(
+        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr = ? ORDER BY id DESC LIMIT 1",
+        (repo, KIND, number),
+    ).fetchone()
+    if workflow is None:
+        return False
+    head = github.pull(repo, number)["head"]["ref"]
+    opened = next((r for r in conn.execute(
+        "SELECT * FROM runs WHERE workflow_id = ? AND task = 'implement' AND outcome = 'succeeded' "
+        "ORDER BY id DESC", (workflow["id"],))
+        if json.loads(r["dispatch"]).get("branch") == head), None)
+    if opened is None:
+        return False
+    if triggered_by is None or triggered_by.id is None:
+        # Review's commits credit whoever asked for it; here no one is known.
+        github.post_comment(repo, number, tickets.render_notice(
+            "The PR's events don't say who added `agent:review`, so nothing was started. "
+            "Add it again."))
+        return True
+    ctx = Context(conn, github, cast(Runner, None), settings)  # queueing never uses the runner
+    base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
+    workflow = base.get(conn, workflow["id"])
+    assert workflow is not None
+    if _queue_review(ctx, opened, workflow, number, branch=head,
+                     pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
+                     triggered_by=(triggered_by.login, triggered_by.id)) is None:
+        return True
+    for label in base.STALE:
+        github.remove_label(repo, number, label)
+    base.mark_in_progress(github, repo, int(workflow["subject"]))
+    return True
+
+
 def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """Act on a done run. A cancelled run (its ticket closed, or `factory
     cancel`) cancels the workflow. A bad run reaches here only once it was the
     last attempt (`factory.attempts` retries the others): the workflow gives
-    up. Otherwise explore's and implement's results are handled so far;
-    review (#13) adds its own."""
+    up. Otherwise explore's, implement's and review's results are handled,
+    including a review whose fixes failed the check (`review.output_used`)."""
     if run["outcome"] == "cancelled":
         if workflow["status"] == "active":
             base.end(ctx, workflow, "cancelled", int(run["ticket"]))
@@ -93,16 +141,126 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
     elif run["task"] == "implement" and run["outcome"] == "succeeded":
         _implemented(ctx, run, workflow, json.loads(run["result"])["output"])
+    elif review.output_used(run):
+        _reviewed(ctx, run, workflow, json.loads(run["result"]))
+
+
+def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict[str, Any]) -> None:
+    """Review's result (orchestrator.md#review): its fixes pushed without
+    force (or discarded, if they failed the check), one verdict comment, then
+    the PR marked ready and its human asked to review it. If the branch moved
+    while review ran, the fixes are discarded and review is queued again."""
+    repo, ticket = run["repo"], int(run["ticket"])
+    dispatch = json.loads(run["dispatch"])
+    pr = dispatch["pr_number"]
+    discarded = result["outcome"] == "failed"
+    if not discarded:
+        store = _store(ctx)
+        checked = _checked(ctx, store, run, dispatch["base_sha"])
+        if checked is not None:
+            try:
+                store.push(repo, run["id"], dispatch["branch"])
+            except bundles.Moved:
+                _branch_moved(ctx, run, workflow)
+                return
+    link = ctx.runner.log_link(repo, run["runner_run_id"])
+    review.post_verdict(ctx.github, repo, pr, run["id"],
+                        review.render_verdict(run["id"], result, link, discarded=discarded))
+    review.finish(ctx.github, repo, pr,
+                  needs_a_human=discarded or review.changes_requested(result["output"]),
+                  reviewer=run["triggered_by"])
+    base.end(ctx, workflow, "done", ticket)
+    log.info("review run %s posted on %s#%s%s", run["id"], repo, pr,
+             " (fixes discarded: they failed the check)" if discarded else "",
+             extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
+
+
+def _branch_moved(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
+    """The PR's branch got new commits while review ran: review looked at a
+    head that no longer exists. Its fixes are discarded (`superseded`) and
+    review is queued again as the next attempt, from the new head
+    (`factory.attempts`); out of attempts, the workflow gives up."""
+    with ctx.conn:
+        ctx.conn.execute("UPDATE runs SET outcome = 'superseded' WHERE id = ?", (run["id"],))
+    run = loop.get_run(ctx.conn, run["id"])
+    assert run is not None
+    log.info("review run %s: %s moved while it ran; its fixes were discarded", run["id"],
+             json.loads(run["dispatch"])["branch"],
+             extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+    if attempts.retry(ctx.conn, run) is None:
+        _give_up(ctx, run, workflow)
 
 
 def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, Any] | None:
     """Implement starts from the default branch's head at dispatch time, for
     every attempt, so a row held back by the usage pause or a retry doesn't
     build on stale code (orchestrator.md#implement-ticket)."""
-    if run["task"] != "implement":
-        return None
     dispatch = json.loads(run["dispatch"])
-    return {**dispatch, "base_sha": ctx.github.default_branch_head(run["repo"])}
+    if run["task"] == "implement":
+        return {**dispatch, "base_sha": ctx.github.default_branch_head(run["repo"])}
+    if run["task"] == "review":
+        # Review looks at the PR as it is when the run starts, so a human's
+        # push while it waited doesn't make its fixes land on a moved branch.
+        head = _store(ctx).branch_head(run["repo"], dispatch["branch"])
+        return {**dispatch, "base_sha": head} if head else None
+    return None
+
+
+def _store(ctx: Context) -> bundles.Store:
+    return bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
+
+
+def _test_paths(ctx: Context, repo: str) -> list[str]:
+    enrolment = enrolments.get(ctx.conn, repo)
+    return list(enrolment.config.test_paths or []) if enrolment else []
+
+
+def _queue_review(
+    ctx: Context, after: sqlite3.Row, workflow: sqlite3.Row, pr: int, *, branch: str,
+    pr_base_sha: str, triggered_by: tuple[str, int] | None = None,
+) -> int | None:
+    """Queue review of the workflow's PR, from the branch's head now (`prepare`
+    freshens it at dispatch). It copies `after`'s `triggered_by` unless a human
+    re-added `agent:review` (`triggered_by`). None if the PR and its ticket are
+    too big to dispatch: a notice on the PR says so and the workflow stops."""
+    repo, ticket = workflow["repo"], workflow["subject"]
+    login, user = triggered_by or (after["triggered_by"], after["triggered_by_id"])
+    enrolment = enrolments.get(ctx.conn, repo)
+    assert enrolment is not None  # an unenrolled repo's runs are never handled
+    head = _store(ctx).branch_head(repo, branch)
+    if head is None:
+        raise bundles.GitError(f"{branch}, PR #{pr}'s branch, isn't on {repo}")
+    pr_issue = ctx.github.get_issue(repo, pr)
+    specs = [ctx.github.get_issue(repo, n) for n in review.against(ctx.conn, ctx.github, repo, pr)]
+    try:
+        dispatch = tickets.fit(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "repo": repo,
+                "task": "review",
+                "ticket": ticket,
+                "pr_number": pr,
+                "pr_base_sha": pr_base_sha,
+                "findings_only": False,
+                "base_sha": head,
+                "branch": branch,
+                "triggered_by": {"login": login, "id": user},
+                "enrolment_sha": enrolment.sha,
+                "model": ctx.settings.model("review", enrolment),
+                "timeout_minutes": ctx.settings.timeout("review", enrolment),
+            },
+            review.render_input(ctx.github, repo, pr_issue, specs),
+        )
+    except tickets.TooBig as e:
+        ctx.github.post_comment(repo, pr, tickets.render_too_big_notice(str(e), login))
+        base.end(ctx, workflow, "stopped", int(ticket), "needs-a-human")
+        log.info("%s#%s is too big to review: %s", repo, pr, e, extra={"repo": repo})
+        return None
+    run_id = loop.enqueue(ctx.conn, repo=repo, task="review", ticket=ticket, dispatch=dispatch,
+                          workflow_id=workflow["id"], triggered_by=login, triggered_by_id=user)
+    log.info("queued review run %s of %s#%s for #%s", run_id, repo, pr, ticket,
+             extra=about_run(id=run_id, repo=repo, ticket=ticket))
+    return run_id
 
 
 def _implemented(
@@ -122,6 +280,7 @@ def _implemented(
     dispatch = json.loads(run["dispatch"])
     store = bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
     checked = _checked(ctx, store, run, dispatch["base_sha"])
+    assert checked is not None  # built always has commits
     store.push(repo, run["id"], dispatch["branch"])
     issue = ctx.github.get_issue(repo, number)
     enrolment = enrolments.get(ctx.conn, repo)
@@ -139,22 +298,36 @@ def _implemented(
         ctx.conn.execute("UPDATE workflows SET pr = ? WHERE id = ?", (pr, workflow["id"]))
     log.info("implement run %s built %s#%s: draft PR #%s from %s", run["id"], repo, number, pr,
              dispatch["branch"], extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
+    if not ctx.conn.execute(
+        "SELECT 1 FROM runs WHERE workflow_id = ? AND task = 'review' AND id > ?",
+        (run["workflow_id"], run["id"]),
+    ).fetchone():
+        _queue_review(ctx, run, workflow, pr, branch=dispatch["branch"],
+                      pr_base_sha=dispatch["base_sha"])
 
 
 def _checked(
     ctx: Context, store: bundles.Store, run: sqlite3.Row, base_sha: str
-) -> bundles.Checked:
-    """The run's bundle as checked on collection. If the store lost it (e.g.
-    it was wiped), the run's files are fetched and checked again."""
+) -> bundles.Checked | None:
+    """The run's bundle as checked on collection, or None for a review that
+    made no fixes. If the store lost it (e.g. it was wiped), the run's files
+    are fetched and checked again."""
     checked = store.checked(run["repo"], run["id"], base_sha)
-    if checked is None:
-        files = ctx.runner.files(run["repo"], run["runner_run_id"])
-        if files is None or files.bundle is None:
-            raise bundles.GitError(f"run {run['id']}'s bundle is gone from the runner")
-        checked = store.check(run["repo"], run["id"], files.bundle, task="implement",
-                              verdict="built", base_sha=base_sha)
-    assert checked is not None
-    return checked
+    if checked is not None:
+        return checked
+    files = ctx.runner.files(run["repo"], run["runner_run_id"])
+    if files is None:
+        raise bundles.GitError(f"run {run['id']}'s files are gone from the runner")
+    if files.bundle is None and run["task"] == "review":
+        return None  # review's bundle may be empty: no bundle at all
+    if files.bundle is None:
+        raise bundles.GitError(f"run {run['id']}'s bundle is gone from the runner")
+    dispatch = json.loads(run["dispatch"])
+    output = json.loads(run["result"]).get("output") or {}
+    return store.check(run["repo"], run["id"], files.bundle, task=run["task"],
+                       verdict=output.get("verdict"), base_sha=base_sha,
+                       pr_base_sha=dispatch.get("pr_base_sha"),
+                       test_paths=_test_paths(ctx, run["repo"]))
 
 
 def _ticket_changed(
@@ -182,8 +355,12 @@ def _when(iso: str) -> datetime:
 
 
 def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
-    """The ticket ran out of attempts: a notice, `agent:blocked`, and the workflow stops."""
+    """The ticket ran out of attempts: a notice, `agent:blocked`, and the
+    workflow stops. For review they go on the PR, which stays a draft: marking
+    it ready would say someone had read it."""
     repo, number = run["repo"], int(run["ticket"])
+    if run["task"] == "review":
+        number = json.loads(run["dispatch"])["pr_number"]
     ended = attempts.failure(run) or run["outcome"]
     link = ctx.runner.log_link(repo, run["runner_run_id"]) if run["runner_run_id"] else None
     last = f"[run {run['id']}]({link})" if link else f"run {run['id']}"
@@ -193,7 +370,11 @@ def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     )
     ctx.github.post_comment(repo, number, tickets.render_notice(
         message, [run["triggered_by"]] if run["triggered_by"] else None))
-    base.end(ctx, workflow, "stopped", number, "agent:blocked")
+    if run["task"] == "review":
+        ctx.github.add_labels(repo, number, ["agent:blocked"])
+        base.end(ctx, workflow, "stopped", int(run["ticket"]))
+    else:
+        base.end(ctx, workflow, "stopped", number, "agent:blocked")
     log.info("gave up on %s#%s after run %s ended %s", repo, number, run["id"], ended,
              extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
 

@@ -5,8 +5,8 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Every trigger label is checked (`factory.triggers`); only explore is queued so
-far. What a finished run leads to is its workflow's business (`factory.workflows`).
+Every trigger label is checked (`factory.triggers`); explore, and review of a
+factory PR, are queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
 """
 
 import json
@@ -83,8 +83,9 @@ def handle_triggers(
     `issues` is what a poll found: a full scan's open issues and PRs, or the
     issues and PRs (open or closed) updated since the cursor.
 
-    Only explore is queued so far; an accepted `agent:implement`, `agent:review`
-    or `agent:implement-spec` is left on its issue for the tickets that build
+    Explore, and `agent:review` on a PR the factory opened for a ticket, are
+    queued so far; an accepted `agent:implement`, `agent:review` on any other
+    PR, or `agent:implement-spec` is left on its issue for the tickets that build
     those tasks. The row is inserted first, then the label removed, so a crash
     between the two leaves a duplicate trigger rather than a lost one, which
     the next poll removes quietly. A ticket too big to dispatch gets a notice
@@ -111,6 +112,11 @@ def handle_triggers(
             implement_ticket.start_explore(conn, github, settings, issue, enrolment,
                                            decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
+        elif decision.task == "review":
+            # A PR the factory didn't open is left for findings-only review (#14).
+            if implement_ticket.start_review(conn, github, settings, issue, enrolment,
+                                             decision.triggered_by):
+                github.remove_label(repo, issue["number"], decision.label)
 
 
 def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
@@ -349,7 +355,7 @@ def run_once(
     if woke and poller is not None:
         usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
     loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
-              check=_bundle_check(github, settings),
+              check=_bundle_check(conn, github, settings),
               prepare=_try_later(lambda row: workflows.prepare(ctx, row)),
               gate=lambda now: _gate(conn, settings.limits, held, now))
     handle_finished(conn, github, runner, settings)
@@ -390,15 +396,19 @@ def _try_later[**P, R](f: Callable[P, R]) -> Callable[P, R]:
     return wrapped
 
 
-def _bundle_check(github: GitHub, settings: Settings) -> loop.Check:
+def _bundle_check(conn: sqlite3.Connection, github: GitHub, settings: Settings) -> loop.Check:
     """The bundle checks of the runner contract, for every task's result."""
     store = bundles.Store(settings.git_dir, github.git_remote)
 
     @_try_later
     def check(row: sqlite3.Row, result: dict[str, Any], files: Any) -> None:
+        dispatch = json.loads(row["dispatch"])
+        enrolment = enrolments.get(conn, row["repo"])
         store.check(row["repo"], row["id"], files.bundle, task=row["task"],
                     verdict=(result.get("output") or {}).get("verdict"),
-                    base_sha=json.loads(row["dispatch"]).get("base_sha", ""))
+                    base_sha=dispatch.get("base_sha", ""),
+                    pr_base_sha=dispatch.get("pr_base_sha"),
+                    test_paths=(enrolment.config.test_paths or []) if enrolment else [])
 
     return check
 
