@@ -15,6 +15,26 @@ class RunState(StrEnum):
     RUNNING = "running"
     FINISHED = "finished"
     MISSING = "missing"  # the runner has no such run
+    # Finished because the runner enforced the dispatch's timeout itself. Not a
+    # human cancelling it: the outcome is `timed_out`, and the run left no files.
+    TIMED_OUT = "timed_out"
+
+
+class RunnerUnavailable(Exception):
+    """The runner can't be reached or refuses a request, whatever the cause.
+
+    Never a verdict on the run: a run that wasn't dispatched stays `queued`, and
+    a `dispatched` run stays as it is until the runner answers. Different from
+    `RunState.MISSING`, where the runner answers that it has no such run.
+    """
+
+
+class RunRefused(RunnerUnavailable):
+    """The runner refused a run it had accepted (on Actions: the spending limit).
+
+    The run will never happen, so it goes back to `queued` without counting an
+    attempt.
+    """
 
 
 @dataclass(frozen=True)
@@ -27,10 +47,13 @@ class RunFiles:
 
 
 class Runner(Protocol):
+    """Every method may raise `RunnerUnavailable`."""
+
     def dispatch(self, repo: str, dispatch: dict[str, Any]) -> str:
         """Start a run and return the runner's own id for it."""
 
-    def state(self, repo: str, runner_run_id: str) -> RunState: ...
+    def state(self, repo: str, runner_run_id: str) -> RunState:
+        """Raises `RunRefused` for a run the runner refused to start."""
 
     def files(self, repo: str, runner_run_id: str) -> RunFiles | None:
         """A finished run's files, or None if it left none."""
@@ -78,6 +101,10 @@ class FakeRunner:
 
     def finish(self, runner_run_id: str, files: RunFiles | None) -> None:
         self._runs[runner_run_id].update(state=RunState.FINISHED, files=files)
+
+    def time_out(self, runner_run_id: str) -> None:
+        """The runner ended the run at the dispatch's timeout."""
+        self._runs[runner_run_id].update(state=RunState.TIMED_OUT, files=None)
 
     def forget(self, runner_run_id: str) -> None:
         """The runner no longer knows the run, e.g. its files expired."""

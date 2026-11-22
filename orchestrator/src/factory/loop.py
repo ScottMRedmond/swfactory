@@ -68,6 +68,10 @@ def collect(conn: sqlite3.Connection, runner: Runner) -> None:
             log.warning("run %s is missing on the runner", row["id"])
             _finish(conn, row["id"], "failed", None)
             continue
+        if state is RunState.TIMED_OUT:
+            log.warning("run %s hit its timeout on the runner", row["id"])
+            _finish(conn, row["id"], "timed_out", None)
+            continue
         files = runner.files(row["repo"], row["runner_run_id"])
         outcome, result = _judge(row, files)
         _finish(conn, row["id"], outcome, result)

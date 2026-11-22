@@ -167,6 +167,17 @@ def test_a_missing_run_is_failed(conn, runner):
     assert (r["status"], r["outcome"], r["result"]) == ("done", "failed", None)
 
 
+def test_a_run_the_runner_timed_out_is_timed_out(conn, runner):
+    run_id = enqueue_smoke(conn)
+    loop.tick(conn, runner, limit=2)
+    runner.time_out(row(conn, run_id)["runner_run_id"])
+
+    loop.tick(conn, runner, limit=2)
+
+    r = row(conn, run_id)
+    assert (r["status"], r["outcome"], r["result"]) == ("done", "timed_out", None)
+
+
 def test_a_finished_run_without_files_is_failed(conn, runner):
     run_id = enqueue_smoke(conn)
     loop.tick(conn, runner, limit=2)
