@@ -13,6 +13,7 @@ RUNS_COLUMNS = [
     "cancel_requested_at",  # not in the design doc: when `factory cancel` asked
     "triggered_by_id",  # not in the design doc: triggered_by's numeric GitHub user id
     "shown_at",  # not in the design doc: when a done run's line was shown in its status comment
+    "validation_error",  # not in the design doc: why an invalid result was invalid
 ]
 
 

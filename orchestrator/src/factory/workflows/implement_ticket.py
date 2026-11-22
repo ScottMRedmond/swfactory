@@ -17,7 +17,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from factory import bundles, loop, tickets
+from factory import attempts, bundles, loop, tickets
 from factory import enrolment as enrolments
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
@@ -79,11 +79,16 @@ def start_explore(
 
 def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """Act on a done run. A cancelled run (its ticket closed, or `factory
-    cancel`) cancels the workflow. Otherwise explore's and implement's results
-    are handled so far; review (#13) adds its own, and failed runs are #16's."""
+    cancel`) cancels the workflow. A bad run reaches here only once it was the
+    last attempt (`factory.attempts` retries the others): the workflow gives
+    up. Otherwise explore's and implement's results are handled so far;
+    review (#13) adds its own."""
     if run["outcome"] == "cancelled":
         if workflow["status"] == "active":
             base.end(ctx, workflow, "cancelled", int(run["ticket"]))
+    elif attempts.is_bad(run):
+        if workflow["status"] == "active":
+            _give_up(ctx, run, workflow)
     elif run["task"] == "explore" and run["outcome"] == "succeeded":
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
     elif run["task"] == "implement" and run["outcome"] == "succeeded":
@@ -174,6 +179,23 @@ def _ticket_changed(
 
 def _when(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
+    """The ticket ran out of attempts: a notice, `agent:blocked`, and the workflow stops."""
+    repo, number = run["repo"], int(run["ticket"])
+    ended = attempts.failure(run) or run["outcome"]
+    link = ctx.runner.log_link(repo, run["runner_run_id"]) if run["runner_run_id"] else None
+    last = f"[run {run['id']}]({link})" if link else f"run {run['id']}"
+    message = (
+        f"The factory gave up on `{run['task']}` after {run['attempt']} attempts: the last, "
+        f"{last}, ended `{ended}`. Add `agent:{run['task']}` to try again from attempt 1."
+    )
+    ctx.github.post_comment(repo, number, tickets.render_notice(
+        message, [run["triggered_by"]] if run["triggered_by"] else None))
+    base.end(ctx, workflow, "stopped", number, "agent:blocked")
+    log.info("gave up on %s#%s after run %s ended %s", repo, number, run["id"], ended,
+             extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
 
 
 def _explored(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[str, Any]) -> None:

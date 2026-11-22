@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, bundles, loop, status_comment, triggers, workflows
+from factory import attempts, brakes, bundles, loop, status_comment, triggers, workflows
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -330,12 +330,14 @@ def run_once(
 
     `poller` holds the polling state between passes; without one, every repo
     gets a full scan. A repo whose calls fail backs off; the others carry on.
-    Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
+    Queued runs of a repo with `enabled: false` (or no longer enrolled), or
+    held for `claude_auth`, wait; a `contract_mismatch` pauses every dispatch.
     """
     (poller or Poller()).poll_all(conn, github, settings)
     held = enrolments.held(conn)
     ctx = workflows.Context(conn, github, runner, settings)
-    loop.tick(conn, runner, limit=settings.max_in_flight, held=held,
+    loop.tick(conn, runner, limit=settings.max_in_flight,
+              held=held | attempts.held_repos(conn), paused=attempts.dispatch_paused(conn),
               check=_bundle_check(github, settings), prepare=_try_later(
                   lambda row: workflows.prepare(ctx, row)))
     handle_finished(conn, github, runner, settings)
@@ -411,6 +413,7 @@ def serve(
     enrolments are used, and it's tried again on the next pass.
     """
     log.info("serving, polling every %ss", settings.poll_seconds)
+    attempts.lift_holds(conn)
     refreshed_at: float | None = None
     poller = Poller(clock)
     while True:

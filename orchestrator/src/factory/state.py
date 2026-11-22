@@ -34,6 +34,46 @@ def is_paused(conn: sqlite3.Connection) -> bool:
     return bool(row and json.loads(row["value"]))
 
 
+# --- the runner's availability ---
+#
+# Since when the runner hasn't answered (or has refused runs), and when it last
+# refused one (on Actions: the spending limit), so dispatching backs off.
+
+
+def _get(conn: sqlite3.Connection, key: str) -> Any:
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return None if row is None else json.loads(row["value"])
+
+
+def _set(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    with conn:
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute(
+                """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT (key) DO UPDATE SET value = excluded.value,
+                                                  updated_at = excluded.updated_at""",
+                (key, json.dumps(value), _now()),
+            )
+
+
+def runner_unavailable_since(conn: sqlite3.Connection) -> str | None:
+    return _get(conn, "runner_unavailable_since")
+
+
+def set_runner_unavailable_since(conn: sqlite3.Connection, at: str | None) -> None:
+    _set(conn, "runner_unavailable_since", at)
+
+
+def runner_refused_at(conn: sqlite3.Connection) -> str | None:
+    return _get(conn, "runner_refused_at")
+
+
+def set_runner_refused_at(conn: sqlite3.Connection, at: str | None) -> None:
+    _set(conn, "runner_refused_at", at)
+
+
 # --- Claude usage ---
 
 
