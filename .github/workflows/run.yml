@@ -64,8 +64,11 @@ jobs:
           # stores it in the clone.
           GITHUB_TOKEN: ${{ github.token }}
           FACTORY_BUILD_CACHE: gha
-          # The script hands it to the agent's `docker exec` by name and to
-          # nothing else: setup and the check never see it.
+          # The step's env is as narrow as Actions allows (secrets can't be
+          # scoped to part of a step). The script deletes it from its own
+          # environment before it runs anything, and hands it only to the
+          # agent's `docker exec`: git, the image build, setup and the check
+          # never see it. Only npx/tsx, which start the script, inherit it.
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The App's bot identity, which authors every commit an agent makes.
           # The email is <bot user id>+<name>@users.noreply.github.com; the

@@ -341,6 +341,32 @@ describe("the agent step", () => {
     expect(run.output).not.toMatch(/^(setup|check)-env: CLAUDE/m);
   });
 
+  it("hands the Claude token to the agent's docker exec and to no other command it runs", () => {
+    // git, docker and tar on PATH log each call made with the token in its environment.
+    const bin = mkdtempSync(join(tmpdir(), "factory-bin-"));
+    const calls = join(bin, "calls.log");
+    for (const command of ["git", "docker", "tar"]) {
+      const real = execFileSync("sh", ["-c", `command -v ${command}`], { encoding: "utf8" }).trim();
+      writeFileSync(
+        join(bin, command),
+        `#!/bin/sh\n[ -n "\${CLAUDE_CODE_OAUTH_TOKEN-}" ] && echo "${command} $*" >> ${calls}\nexec ${real} "$@"\n`,
+        { mode: 0o755 },
+      );
+    }
+    const target = makeTarget();
+    const sha = target.commit(fakeClaude(`${writeOutput(implementOutput)}\n${success}`));
+
+    const run = runTask(implementDispatch(sha), target.url, {
+      ...claudeEnv,
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+
+    expect(run.result?.outcome, run.output).toBe("succeeded");
+    const withToken = readFileSync(calls, "utf8").trim().split("\n");
+    expect(withToken.length).toBeGreaterThan(0);
+    for (const call of withToken) expect(call).toMatch(/^docker exec -d -e CLAUDE_CODE_OAUTH_TOKEN /);
+  });
+
   it("gives the agent the ticket and its output's schema, and runs no check or bundle for explore", () => {
     const exploreOutput = {
       verdict: "easy-call",

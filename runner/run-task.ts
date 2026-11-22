@@ -17,7 +17,9 @@
 //
 //   GITHUB_TOKEN        read-only token used to fetch the target, passed to
 //                       git per command and never written to .git/config
-//   CLAUDE_CODE_OAUTH_TOKEN  the Claude token, passed to the agent only
+//   CLAUDE_CODE_OAUTH_TOKEN  the Claude token: taken out of this process's
+//                       environment at the start and passed to the agent's
+//                       `docker exec` only
 //   FACTORY_BOT_NAME, FACTORY_BOT_EMAIL  the App's bot identity, which
 //                       authors the agent's commits (implement and review)
 //   FACTORY_TARGET_URL  where to fetch the target from (default
@@ -33,7 +35,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
+import {
+  AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, takeClaudeToken, type AgentOutcome,
+} from "./agent";
 import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
 import { loadContracts, type Contract, type Contracts } from "./contract";
 import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
@@ -262,7 +266,9 @@ const taskPrompt = (contract: Contract, task: string, enrolment: Enrolment): str
 
 // Step 4: the agent. Its timeout is the job's (capped at 60 like run.yml)
 // minus 5 minutes, so the steps after it still have time to run.
-const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment, container: string): AgentOutcome => {
+const agentStep = (
+  contract: Contract, dispatch: Dispatch, enrolment: Enrolment, container: string, token: string | undefined,
+): AgentOutcome => {
   if (dispatch.ticket_markdown !== undefined) {
     putFile(container, TICKET, withPreviousAttempt(dispatch.ticket_markdown, dispatch.previous_attempt));
   }
@@ -273,6 +279,7 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
   const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
   return runAgent({
     container,
+    token,
     workspace: WORKSPACE,
     model: dispatch.model!,
     prompt: taskPrompt(contract, dispatch.task, enrolment),
@@ -283,7 +290,9 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
 };
 
 // The steps after the dispatch is accepted. It always returns a result.
-const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: string): Result => {
+const runTask = (
+  contract: Contract, dispatch: Dispatch, work: string, outDir: string, token: string | undefined,
+): Result => {
   const base = {
     contract_version: dispatch.contract_version,
     run_id: dispatch.run_id,
@@ -326,7 +335,7 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
       branch = { name: dispatch.branch, identity, triggeredBy: dispatch.triggered_by };
     }
     if (AGENT_TASKS.includes(dispatch.task)) {
-      const agent = agentStep(contract, dispatch, enrolment, container.id);
+      const agent = agentStep(contract, dispatch, enrolment, container.id, token);
       if ("failure" in agent) throw new RunFailure(agent.failure, agent.reason);
       output = agent.output;
     }
@@ -419,6 +428,8 @@ const accept = (
 };
 
 const main = (argv: string[]): number => {
+  // Before anything else runs, so no command inherits it.
+  const token = takeClaudeToken();
   const [dispatchPath, outDir, workArg] = argv;
   if (!dispatchPath || !outDir) {
     console.error("usage: run-task.ts <dispatch.json> <out-dir> [<work-dir>]");
@@ -435,7 +446,7 @@ const main = (argv: string[]): number => {
     const accepted = accept(contracts, readFileSync(dispatchPath, "utf8"));
     if ("dispatch" in accepted) {
       contract = accepted.contract;
-      result = runTask(contract, accepted.dispatch, work, outDir);
+      result = runTask(contract, accepted.dispatch, work, outDir, token);
     } else {
       result = accepted;
     }
