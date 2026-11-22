@@ -54,7 +54,7 @@ Once it has the files, the orchestrator validates `result.json` and the bundle a
 **On Actions (v1).** The Actions runner implements the interface like this:
 
 - **Dispatch** uses `workflow_dispatch` with `return_run_details: true`, which makes the API return the Actions run it created (since February 2026; confirm the response field's name in the first spike). That run's id is the `runner_run_id`. `run.yml`'s `run-name` includes the factory run id, so a human browsing Actions can match runs to rows.
-- **Files** are the run's artifact. `run.yml` uploads with `retention-days: 7`, which keeps old bundles and transcripts from piling up in public repos.
+- **Files** are the run's artifact. `run.yml` uploads with `retention-days: 7`, which keeps old bundles from piling up and counting against the account's Actions storage.
 - **The log link** is the Actions run's page.
 - **Timeouts:** `run.yml` sets the job's `timeout-minutes` to the smaller of the dispatch's `timeout_minutes` and 60. The cap guards against a human with write access starting the caller workflow by hand with a huge number. Confirm in the first spike that `timeout-minutes` accepts an expression (`${{ fromJSON(inputs.dispatch).timeout_minutes }}`); if it doesn't, `run.yml` keeps its own table of tasks and timeouts.
 
@@ -63,7 +63,7 @@ Once it has the files, the orchestrator validates `result.json` and the bundle a
 - `contract_mismatch` (the runner got a `contract_version` it doesn't accept): the orchestrator pauses dispatching, logs it once and opens a [factory problem](#observability) issue. The rule is: merge a schema change, then redeploy the orchestrator (see [Deploying](#deploying)).
 - `claude_auth` (Claude rejected the token: expired, revoked, or the secret is missing): the orchestrator holds dispatches **for that repo** and opens a [factory problem](#observability) naming it, rather than retrying innocent tickets into `agent:blocked`.
 - `usage_limit` (the run hit the Claude usage limit partway through): the orchestrator queues the run again behind the [usage pause](#limits-and-brakes).
-- **Runner unavailable** (the runner can't be reached or refuses a dispatch, whatever the cause: an Actions outage, a rejected `workflow_dispatch`, a runner machine that's switched off): a run that wasn't dispatched stays `queued`, and a `dispatched` run stays as it is until the runner answers. This is different from a *missing* run, where the runner answers that it has no such run. If the runner stays unavailable for 30 minutes, the orchestrator opens a [factory problem](#observability).
+- **Runner unavailable** (the runner can't be reached or refuses a dispatch, whatever the cause: an Actions outage, a rejected `workflow_dispatch`, runs refused because the Actions spending limit is reached, a runner machine that's switched off): a run that wasn't dispatched stays `queued`, and a `dispatched` run stays as it is until the runner answers. This is different from a *missing* run, where the runner answers that it has no such run. If the runner stays unavailable for 30 minutes, the orchestrator opens a [factory problem](#observability).
 
 A `result.json` with an unknown version is `invalid`.
 
@@ -397,7 +397,7 @@ Success stays quiet, apart from the review request when a PR goes ready. Status 
 - an enrolment that fails its schema
 - an App installed without an enrolment, or the other way round, found on the 10-minute refresh
 
-The daily cap and a usage pause never open one: they're the factory working as designed, and they show on status comments and in `factory status`. The factory repo is public, so the issue names the problem and the repo and never includes a raw error body. `owner` is a GitHub login in `factory-config.yml` at the root of the factory repo's `main`, read on the same 10-minute refresh as the enrolments, so changing it is a commit.
+The daily cap and a usage pause never open one: they're the factory working as designed, and they show on status comments and in `factory status`. The issue names the problem and the repo and never includes a raw error body, which could hold a token or private data. `owner` is a GitHub login in `factory-config.yml` at the root of the factory repo's `main`, read on the same 10-minute refresh as the enrolments, so changing it is a commit.
 
 **Down or asleep.** There's no alert in v1. A dead-man's switch would fire every time the Mac mini sleeps, which it is meant to do. If nothing seems to be happening, `factory status` shows when the last poll ran, and launchd restarts the orchestrator after a crash.
 
@@ -415,13 +415,13 @@ The read commands only read. The three writing commands only write to SQLite, an
 
 **Orchestrator logs.** JSON lines in a log file the orchestrator rotates itself, keeping 30 days. launchd sends stdout and stderr to a separate file, to catch a crash before logging starts. Every line about a run carries `run`, `repo` and `ticket`. Tokens and the App key are never logged, and the `sk-ant-` scan used on posted prose runs on log lines too.
 
-**Retention.** Agent transcripts live with the runner. On Actions they're in the logs, which last at most 90 days on a public repo, and artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
+**Retention.** Agent transcripts live with the runner. On Actions they're in the logs, which last 90 days by default, and artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
 
 **Deferred.** A web runs page: status comments, notices, factory problems and the CLI leave nothing that only a page could show. If reading `factory status` without SSH matters later, the orchestrator could rewrite a pinned "Factory status" issue on the factory repo from the same data.
 
 ## Deploying
 
-- The orchestrator's code lives in the public factory repo (see [Code](software-factory.md#code)).
+- The orchestrator's code lives in the private factory repo (see [Code](software-factory.md#code)).
 - **Deploying the orchestrator** is by hand, from a tag: `git pull` the release, then `launchctl kickstart`. It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The clone it pulls every 10 minutes for enrolments is data, kept separate from the code it runs.
 
 ## Open questions
