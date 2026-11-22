@@ -8,7 +8,7 @@ rows while fewer than `limit` are in flight.
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from factory import tokenscan
@@ -34,6 +34,11 @@ def find_secret(value: Any) -> str | None:
 
 def _about(row: sqlite3.Row) -> dict[str, Any]:
     return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
+
+
+# How long past its task's timeout a still-running run is left before it's
+# cancelled, for queueing and upload (orchestrator.md, "Dispatching and collecting").
+TIMEOUT_GRACE = timedelta(minutes=15)
 
 
 def _now() -> str:
@@ -72,16 +77,49 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
 
 
-def tick(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
-    collect(conn, runner)
+def tick(
+    conn: sqlite3.Connection, runner: Runner, *, limit: int, now: datetime | None = None
+) -> None:
+    cancel_requested(conn, runner)
+    collect(conn, runner, now=now)
     dispatch(conn, runner, limit=limit)
 
 
-def collect(conn: sqlite3.Connection, runner: Runner) -> None:
+def request_cancel(conn: sqlite3.Connection, run_id: int) -> bool:
+    """Ask for an active row to be cancelled in the next tick. False if it's done."""
+    with conn:
+        changed = conn.execute(
+            """UPDATE runs SET cancel_requested_at = coalesce(cancel_requested_at, ?)
+               WHERE id = ? AND status IN ('queued', 'dispatched')""",
+            (_now(), run_id),
+        ).rowcount
+    return changed == 1
+
+
+def cancel_requested(conn: sqlite3.Connection, runner: Runner) -> None:
+    """Cancel each active row someone asked to cancel: `factory cancel`, or a
+    human closing its issue or PR."""
+    rows = conn.execute(
+        """SELECT * FROM runs WHERE cancel_requested_at IS NOT NULL
+           AND status IN ('queued', 'dispatched') ORDER BY id"""
+    ).fetchall()
+    for row in rows:
+        log.info("run %s: cancelling, as asked", row["id"], extra=_about(row))
+        try:
+            cancel(conn, runner, row)
+        except RunnerUnavailable as e:
+            # The request stays; the next tick tries again.
+            log.warning("runner unavailable while cancelling run %s: %s", row["id"], e,
+                        extra=_about(row))
+
+
+def collect(conn: sqlite3.Connection, runner: Runner, *, now: datetime | None = None) -> None:
+    """Collect finished runs, and cancel ones still running well past their timeout."""
+    now = now or datetime.now(UTC)
     rows = conn.execute("SELECT * FROM runs WHERE status = 'dispatched' ORDER BY id").fetchall()
     for row in rows:
         try:
-            _collect_one(conn, runner, row)
+            _collect_one(conn, runner, row, now)
         except RunRefused as e:
             # The run will never happen; not the ticket's fault, so not an attempt.
             log.warning("run %s goes back to the queue: %s", row["id"], e, extra=_about(row))
@@ -98,9 +136,15 @@ def collect(conn: sqlite3.Connection, runner: Runner) -> None:
                         extra=_about(row))
 
 
-def _collect_one(conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row) -> None:
+def _collect_one(
+    conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, now: datetime
+) -> None:
     state = runner.state(row["repo"], row["runner_run_id"])
     if state is RunState.RUNNING:
+        if _overdue(row, now):
+            log.warning("run %s is still running past its timeout; cancelling it", row["id"],
+                        extra=_about(row))
+            cancel(conn, runner, row, outcome="timed_out")
         return
     if state is RunState.MISSING:
         log.warning("run %s is missing on the runner", row["id"], extra=_about(row))
@@ -113,6 +157,29 @@ def _collect_one(conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row) -> 
     files = runner.files(row["repo"], row["runner_run_id"])
     outcome, result = _judge(row, files)
     _finish(conn, row["id"], outcome, result)
+
+
+def _overdue(row: sqlite3.Row, now: datetime) -> bool:
+    timeout = json.loads(row["dispatch"]).get("timeout_minutes")
+    if timeout is None or row["dispatched_at"] is None:
+        return False
+    deadline = datetime.fromisoformat(row["dispatched_at"]) + timedelta(minutes=timeout)
+    return now > deadline + TIMEOUT_GRACE
+
+
+def cancel(
+    conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, *, outcome: str = "cancelled"
+) -> None:
+    """End an active row: cancel it on the runner if dispatched, and mark it done
+    with `outcome` and no result. Whatever the run leaves behind is discarded."""
+    if row["status"] == "dispatched":
+        runner.cancel(row["repo"], row["runner_run_id"])
+    with conn:
+        conn.execute(
+            """UPDATE runs SET status = 'done', outcome = ?, result = NULL, finished_at = ?
+               WHERE id = ? AND status IN ('queued', 'dispatched')""",
+            (outcome, _now(), row["id"]),
+        )
 
 
 def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:

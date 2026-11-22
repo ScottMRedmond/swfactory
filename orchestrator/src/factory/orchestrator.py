@@ -28,12 +28,17 @@ log = logging.getLogger(__name__)
 EXPLORE_LABEL = "agent:explore"
 
 
+# Per-task timeouts in minutes, for the whole job. They live here only and travel
+# in each dispatch; a run still running 15 minutes past its timeout is cancelled.
+DEFAULT_TIMEOUTS = {"explore": 20, "auto-tickets": 20, "implement": 45, "review": 45}
+
+
 @dataclass(frozen=True)
 class Settings:
     repos: list[str]
     poll_seconds: int = 60
     max_in_flight: int = 2
-    timeouts: dict[str, int] = field(default_factory=lambda: {"explore": 20})
+    timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
 
 
@@ -96,6 +101,43 @@ def handle_triggers(
             log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
                      extra=about_run(id=run_id, repo=repo, ticket=ticket))
         github.remove_label(repo, issue["number"], EXPLORE_LABEL)
+
+
+def cancel_closed(
+    conn: sqlite3.Connection, repo: str, issues: list[dict[str, Any]], *, full_scan: bool
+) -> None:
+    """Ask for the active rows of every issue or PR a human has closed to be cancelled.
+
+    `issues` is what the poll found. In a full scan (open issues and PRs only),
+    an issue or PR with active rows that isn't in the list has been closed. In an
+    incremental poll, a closed one shows up with `state: closed`. A row belongs
+    to its ticket and, for runs on a PR, to the PR in its dispatch.
+
+    The cancel itself happens in `loop.tick`, before collecting, so the runner
+    cancels dispatched runs and whatever they leave behind is discarded.
+    """
+    if full_scan:
+        open_numbers = {str(i["number"]) for i in issues}
+
+        def closed(number: str) -> bool:
+            return number not in open_numbers
+    else:
+        closed_numbers = {str(i["number"]) for i in issues if i.get("state") == "closed"}
+
+        def closed(number: str) -> bool:
+            return number in closed_numbers
+
+    rows = conn.execute(
+        """SELECT * FROM runs WHERE repo = ? AND status IN ('queued', 'dispatched')
+           AND cancel_requested_at IS NULL ORDER BY id""",
+        (repo,),
+    ).fetchall()
+    for row in rows:
+        subjects = [row["ticket"], json.loads(row["dispatch"]).get("pr_number")]
+        if any(s is not None and closed(str(s)) for s in subjects):
+            log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"],
+                     extra=_about(row))
+            loop.request_cancel(conn, row["id"])
 
 
 def _label_names(issue: dict[str, Any]) -> set[str]:
@@ -184,6 +226,7 @@ class Poller:
                     repo, since.strftime("%Y-%m-%dT%H:%M:%SZ"), state.etag
                 )
             if issues is not None:
+                cancel_closed(conn, repo, issues, full_scan=state.cursor is None)
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:
