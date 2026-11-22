@@ -68,7 +68,9 @@ The orchestrator runs `claude -p /usage` before dispatching, to apply the [usage
 2. Run a full `claude auth login`. A `setup-token` token isn't enough: `/usage` then returns no usage report, and the factory never dispatches.
 3. Check: `claude -p "/usage" --output-format stream-json --verbose` prints a `usage_report` line.
 
-**Check this under launchd, not just over SSH.** On macOS, Claude Code keeps its login in the Keychain, and a daemon running with no one logged in as `SWFactory` may not be able to read it. After step 6, `factory status` should show a fresh usage reading. If it shows usage as unknown and the log has Claude auth errors, the login can't be read from launchd; this runbook doesn't cover a fix yet.
+**The login works from launchd.** Tested on 2026-11-22 with Claude Code 2.1.330: a system launchd job running as `SWFactory`, with nobody logged in as `SWFactory`, got a full `usage_report` from a login made over SSH. After step 6, `factory status` should show a fresh usage reading.
+
+**The login expires.** The usage result carries `credential_expires_at`, about 30 days after `claude auth login`. Whether Claude Code renews it by itself without anyone running it interactively hasn't been checked. If it lapses, usage becomes unreadable, the factory stops dispatching, and after 15 minutes it opens a [factory problem](orchestrator.md#observability). The fix is to run `claude auth login` again as `SWFactory`.
 
 ### 6. The launchd job
 
@@ -93,7 +95,29 @@ factory logs --follow
 
 If it won't stay up, look in `~/.factory/launchd.log` first.
 
-### 7. Enrol a repo
+### 7. Let `SWFactory` restart its own job
+
+`SWFactory` isn't an admin. One sudo rule lets it restart the orchestrator, and nothing else, so releases don't need your admin account. As an admin:
+
+```sh
+sudo visudo -f /etc/sudoers.d/factory
+```
+
+Add this one line and save (`visudo` refuses a rule with a syntax error):
+
+```
+SWFactory ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/local.factory.orchestrator
+```
+
+Check from the laptop. It prints the command back if it's allowed, without running it:
+
+```sh
+ssh SWFactory@macmini 'sudo -n -l /bin/launchctl kickstart -k system/local.factory.orchestrator'
+```
+
+Tested on 2026-11-22. sudo matches the arguments exactly, so the restart must be `kickstart -k` with this label. Anything else, such as leaving out `-k`, asks for a password and fails.
+
+### 8. Enrol a repo
 
 For each repo: install the GitHub App on it, add its `.factory/` enrolment and caller workflow on its default branch (see [Enrolling a repo](software-factory.md#enrolling-a-repo)), add the `CLAUDE_CODE_OAUTH_TOKEN` secret, then:
 
@@ -116,10 +140,10 @@ Deploy by hand, from a tag, never automatically from `main`.
    git fetch --tags
    git checkout v<N>
    orchestrator/.venv/bin/pip install ./orchestrator   # picks up new dependencies
-   sudo launchctl kickstart -k system/local.factory.orchestrator
+   sudo /bin/launchctl kickstart -k system/local.factory.orchestrator
    ```
 
-   `SWFactory` isn't an admin, so run the `kickstart` from your admin account, or give `SWFactory` a sudoers rule for exactly that command.
+   The [sudo rule](#7-let-swfactory-restart-its-own-job) allows this one command without a password. Installing or removing the job (`bootstrap`, `bootout`) still needs your admin account.
 4. Check `factory status` and `factory logs` for the startup lines and the first poll.
 
 Runs in flight keep going on Actions during the restart. The orchestrator collects them when it comes back.
