@@ -103,6 +103,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN triggered_by_id INTEGER;
     """,
+    # 7: why the orchestrator judged a run's result `invalid`, for the retry's
+    # previous_attempt.validation_error.
+    """
+    ALTER TABLE runs ADD COLUMN validation_error TEXT;
+    """,
 ]
 
 

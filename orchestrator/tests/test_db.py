@@ -12,6 +12,7 @@ RUNS_COLUMNS = [
     "log_url",  # not in the design doc: the runner's log link, for the CLI
     "cancel_requested_at",  # not in the design doc: when `factory cancel` asked
     "triggered_by_id",  # not in the design doc: triggered_by's numeric GitHub user id
+    "validation_error",  # not in the design doc: why an invalid result was invalid
 ]
 
 
