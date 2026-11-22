@@ -143,14 +143,18 @@ def _start_review(
     conn: sqlite3.Connection, github: GitHub, settings: Settings, issue: dict[str, Any],
     enrolment: Enrolment, decision: triggers.Trigger,
 ) -> None:
-    """`agent:review` on a PR: a factory PR is reviewed again in its workflow,
-    any other gets a findings-only review, and a fork PR nothing but a notice."""
+    """`agent:review` on a PR: a factory PR (a ticket's or a spec's) is reviewed
+    again in its workflow, any other gets a findings-only review, and a fork PR
+    nothing but a notice."""
     repo, number = enrolment.repo, issue["number"]
     if review.is_fork(github.pull(repo, number), repo):
         who = decision.triggered_by
         github.post_comment(repo, number,
                             render_notice(FORK_NOTICE, [who.login] if who else None))
         log.info("%s#%s is a fork PR: not reviewed", repo, number, extra={"repo": repo})
+        return
+    if implement_spec.start_review(conn, github, settings, issue, enrolment,
+                                   decision.triggered_by):
         return
     if not implement_ticket.start_review(conn, github, settings, issue, enrolment,
                                          decision.triggered_by):
@@ -312,6 +316,8 @@ class Poller:
                 cancel_closed(conn, repo, issues, full_scan=state.cursor is None)
                 implement_ticket.cancel_closed_prs(conn, github, settings, repo, issues,
                                                    full_scan=state.cursor is None)
+                implement_spec.cancel_closed_prs(conn, github, settings, repo, issues,
+                                                 full_scan=state.cursor is None)
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:

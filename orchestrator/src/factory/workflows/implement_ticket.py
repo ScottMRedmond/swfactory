@@ -230,7 +230,7 @@ def start_review(
     base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
     workflow = base.get(conn, workflow["id"])
     assert workflow is not None
-    if _queue_review(ctx, opened, workflow, number, branch=head,
+    if queue_review(ctx, opened, workflow, number, branch=head,
                      pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
                      triggered_by=(triggered_by.login, triggered_by.id)) is None:
         return True
@@ -257,10 +257,10 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     elif run["task"] == "implement" and run["outcome"] == "succeeded":
         _implemented(ctx, run, workflow, json.loads(run["result"])["output"])
     elif review.output_used(run):
-        _reviewed(ctx, run, workflow, json.loads(run["result"]))
+        reviewed(ctx, run, workflow, json.loads(run["result"]))
 
 
-def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict[str, Any]) -> None:
+def reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict[str, Any]) -> None:
     """Review's result (orchestrator.md#review): its fixes pushed without
     force (or discarded, if they failed the check), one verdict comment, then
     the PR marked ready and its human asked to review it. If the branch moved
@@ -329,7 +329,7 @@ def _test_paths(ctx: Context, repo: str) -> list[str]:
     return list(enrolment.config.test_paths or []) if enrolment else []
 
 
-def _queue_review(
+def queue_review(
     ctx: Context, after: sqlite3.Row, workflow: sqlite3.Row, pr: int, *, branch: str,
     pr_base_sha: str, triggered_by: tuple[str, int] | None = None,
 ) -> int | None:
@@ -416,7 +416,7 @@ def _implemented(
         "SELECT 1 FROM runs WHERE workflow_id = ? AND task = 'review' AND id > ?",
         (run["workflow_id"], run["id"]),
     ).fetchone():
-        _queue_review(ctx, run, workflow, pr, branch=dispatch["branch"],
+        queue_review(ctx, run, workflow, pr, branch=dispatch["branch"],
                       pr_base_sha=dispatch["base_sha"])
 
 
