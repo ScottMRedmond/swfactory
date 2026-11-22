@@ -295,6 +295,7 @@ def test_review_fixes_may_touch_only_the_prs_files_and_test_paths(
     if outcome == "invalid":
         assert remote.remote_branch(pr["head"]) == head
         assert verdicts(repo.issues[pr["number"]]) == []
+        assert "outside the PR" in run["validation_error"]
 
 
 # --- re-review ----------------------------------------------------------------------------------

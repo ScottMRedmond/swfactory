@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, bundles, loop, status_comment, triggers, workflows
+from factory import attempts, brakes, bundles, loop, status_comment, triggers, usage, workflows
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -42,14 +42,16 @@ DEFAULT_MODELS = {"explore": "claude-sonnet-4-6", "auto-tickets": "claude-sonnet
 
 @dataclass(frozen=True)
 class Settings:
-    """The global config. An enrolment's `timeouts` and `models` override the
-    per-task defaults for its repo; the rest stays global."""
+    """The global config (orchestrator.md#limits-and-brakes). An enrolment's
+    `timeouts` and `models` override the per-task defaults for its repo; the
+    rest, `limits` included, stays global."""
 
     # The factory's own repo, whose main holds factory-config.yml (`owner`).
     factory_repo: str = "ScottMRedmond/swfactory"
     poll_seconds: int = 60
     refresh_seconds: int = 600  # how often installations and enrolments are re-read
-    max_in_flight: int = 2
+    # Concurrency, the daily cap and the usage thresholds: global, never per repo.
+    limits: brakes.Limits = field(default_factory=brakes.Limits)
     per_issue_concurrency: int = 1  # active runs per issue or PR, whatever the task
     timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
@@ -228,11 +230,14 @@ class Poller:
         self._repos: dict[str, RepoPoll] = {}
         self._last_pass: float | None = None
 
-    def poll_all(self, conn: sqlite3.Connection, github: GitHub, settings: Settings) -> None:
+    def poll_all(self, conn: sqlite3.Connection, github: GitHub, settings: Settings) -> bool:
+        """Poll every repo that's due. True on startup or waking, when the
+        caller should take a fresh usage reading too."""
         now = self._clock()
+        woke = self._last_pass is None or now - self._last_pass > WAKE_GAP_SECONDS
         if self._last_pass is None:
             github.forget_tokens()
-        elif now - self._last_pass > WAKE_GAP_SECONDS:
+        elif woke:
             log.info("%.0f s since the last poll: scanning every repo again", now - self._last_pass)
             github.forget_tokens()
             for state in self._repos.values():
@@ -243,6 +248,7 @@ class Poller:
             if now < state.next_at:
                 continue
             self._poll_repo(conn, github, repo, state, settings, now)
+        return woke
 
     def _poll_repo(
         self,
@@ -336,17 +342,46 @@ def run_once(
 
     `poller` holds the polling state between passes; without one, every repo
     gets a full scan. A repo whose calls fail backs off; the others carry on.
-    Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
+    Queued runs of a repo with `enabled: false` (or no longer enrolled), or
+    held for `claude_auth`, wait, and so does the whole queue while a brake
+    is on (`factory.brakes`: manual pause, `contract_mismatch`, a runner
+    refusal, the daily cap, usage): polling, cancelling, collecting and posting
+    carry on. With a poller, a startup or wake-up pass also takes a fresh
+    usage reading.
     """
-    (poller or Poller()).poll_all(conn, github, settings)
+    woke = (poller or Poller()).poll_all(conn, github, settings)
     held = enrolments.held(conn)
     ctx = workflows.Context(conn, github, runner, settings)
-    loop.tick(conn, runner, limit=settings.max_in_flight, held=held,
-              check=_bundle_check(conn, github, settings), prepare=_try_later(
-                  lambda row: workflows.prepare(ctx, row)))
+    if woke and poller is not None:
+        usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
+    loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
+              check=_bundle_check(conn, github, settings),
+              prepare=_try_later(lambda row: workflows.prepare(ctx, row)),
+              gate=lambda now: _gate(conn, settings.limits, held, now))
     handle_finished(conn, github, runner, settings)
-    status_comment.sync(conn, github, held=held,
-                        limits=brakes.Limits(max_in_flight=settings.max_in_flight))
+    status_comment.sync(conn, github, held=held, limits=settings.limits)
+
+
+def _gate(
+    conn: sqlite3.Connection, limits: brakes.Limits, held: dict[str, str], now: datetime
+) -> int | None:
+    """How many rows the brakes let this pass dispatch (the daily cap's
+    remainder), or None for none (see `factory.brakes`).
+
+    The usage reading is taken here, just before dispatching, and only when
+    something could be dispatched: no other brake is on, a slot is free and a
+    row of a repo that isn't held is queued. A reading is reused for 5 minutes.
+    """
+    if brakes.global_hold(conn, limits, now, usage=False) is not None:
+        return None
+    in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
+    waiting = conn.execute("SELECT DISTINCT repo FROM runs WHERE status = 'queued'").fetchall()
+    if in_flight >= limits.max_in_flight or all(r["repo"] in held for r in waiting):
+        return None
+    usage.refresh(conn, limits, now)
+    if brakes.usage_hold(db_state.latest_usage(conn), limits, now) is not None:
+        return None
+    return limits.daily_cap - brakes.daily_count(conn, now)
 
 
 def _try_later[**P, R](f: Callable[P, R]) -> Callable[P, R]:
@@ -421,6 +456,7 @@ def serve(
     enrolments are used, and it's tried again on the next pass.
     """
     log.info("serving, polling every %ss", settings.poll_seconds)
+    attempts.lift_holds(conn)
     refreshed_at: float | None = None
     poller = Poller(clock)
     while True:

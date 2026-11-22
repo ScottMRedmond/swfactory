@@ -19,14 +19,13 @@ from dataclasses import replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from factory import bundles, loop, review, tickets
+from factory import attempts, bundles, loop, review, tickets
 from factory import enrolment as enrolments
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub
 from factory.runner import Runner
 from factory.logs import about_run
-from factory.status_comment import MAX_ATTEMPTS
 from factory.workflows import base
 from factory.workflows.base import Context
 
@@ -128,31 +127,22 @@ def start_review(
 
 def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """Act on a done run. A cancelled run (its ticket closed, or `factory
-    cancel`) cancels the workflow. Otherwise explore's, implement's and
-    review's results are handled; failed runs are #16's, except a review
-    whose fixes failed the check (see `review_output_used`)."""
+    cancel`) cancels the workflow. A bad run reaches here only once it was the
+    last attempt (`factory.attempts` retries the others): the workflow gives
+    up. Otherwise explore's, implement's and review's results are handled,
+    including a review whose fixes failed the check (`review.output_used`)."""
     if run["outcome"] == "cancelled":
         if workflow["status"] == "active":
             base.end(ctx, workflow, "cancelled", int(run["ticket"]))
+    elif attempts.is_bad(run):
+        if workflow["status"] == "active":
+            _give_up(ctx, run, workflow)
     elif run["task"] == "explore" and run["outcome"] == "succeeded":
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
     elif run["task"] == "implement" and run["outcome"] == "succeeded":
         _implemented(ctx, run, workflow, json.loads(run["result"])["output"])
-    elif run["task"] == "review" and review_output_used(run):
+    elif review.output_used(run):
         _reviewed(ctx, run, workflow, json.loads(run["result"]))
-
-
-def review_output_used(run: sqlite3.Row) -> bool:
-    """Whether a done review's output is acted on: it succeeded, or only its
-    fixes failed the check, the one case a failed result's output is used
-    (and isn't retried)."""
-    if run["task"] != "review" or run["result"] is None:
-        return False
-    if run["outcome"] == "succeeded":
-        return True
-    result = json.loads(run["result"])
-    return (run["outcome"] == "failed" and result.get("failure") == "check_failed"
-            and result.get("output") is not None)
 
 
 def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict[str, Any]) -> None:
@@ -188,34 +178,17 @@ def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dic
 def _branch_moved(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """The PR's branch got new commits while review ran: review looked at a
     head that no longer exists. Its fixes are discarded (`superseded`) and
-    review queued again as the next attempt, from the new head. Out of
-    attempts, the PR stays a draft and gets `agent:blocked`."""
-    repo, dispatch = run["repo"], json.loads(run["dispatch"])
-    pr = dispatch["pr_number"]
+    review is queued again as the next attempt, from the new head
+    (`factory.attempts`); out of attempts, the workflow gives up."""
     with ctx.conn:
         ctx.conn.execute("UPDATE runs SET outcome = 'superseded' WHERE id = ?", (run["id"],))
-    if run["attempt"] >= MAX_ATTEMPTS:
-        ctx.github.post_comment(repo, pr, tickets.render_notice(
-            f"Review gave up after {run['attempt']} attempts: `{dispatch['branch']}` got new "
-            "commits while review was running each time, so its fixes were discarded. This PR "
-            "stays a draft. Add `agent:review` to try again.",
-            [run["triggered_by"]] if run["triggered_by"] else []))
-        ctx.github.add_labels(repo, pr, ["agent:blocked"])
-        base.end(ctx, workflow, "stopped", int(run["ticket"]))
-        log.info("review run %s: %s moved again; out of attempts", run["id"], dispatch["branch"],
-                 extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
-        return
-    if ctx.conn.execute("SELECT 1 FROM runs WHERE retry_of = ?", (run["id"],)).fetchone():
-        return
-    again = {k: v for k, v in dispatch.items() if k != "run_id"}
-    run_id = loop.enqueue(ctx.conn, repo=repo, task="review", ticket=run["ticket"],
-                          dispatch=again, workflow_id=run["workflow_id"],
-                          attempt=run["attempt"] + 1, retry_of=run["id"],
-                          triggered_by=run["triggered_by"],
-                          triggered_by_id=run["triggered_by_id"])
-    log.info("review run %s: %s moved while it ran; fixes discarded, queued review run %s",
-             run["id"], dispatch["branch"], run_id,
-             extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
+    run = loop.get_run(ctx.conn, run["id"])
+    assert run is not None
+    log.info("review run %s: %s moved while it ran; its fixes were discarded", run["id"],
+             json.loads(run["dispatch"])["branch"],
+             extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+    if attempts.retry(ctx.conn, run) is None:
+        _give_up(ctx, run, workflow)
 
 
 def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, Any] | None:
@@ -379,6 +352,31 @@ def _ticket_changed(
 
 def _when(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
+    """The ticket ran out of attempts: a notice, `agent:blocked`, and the
+    workflow stops. For review they go on the PR, which stays a draft: marking
+    it ready would say someone had read it."""
+    repo, number = run["repo"], int(run["ticket"])
+    if run["task"] == "review":
+        number = json.loads(run["dispatch"])["pr_number"]
+    ended = attempts.failure(run) or run["outcome"]
+    link = ctx.runner.log_link(repo, run["runner_run_id"]) if run["runner_run_id"] else None
+    last = f"[run {run['id']}]({link})" if link else f"run {run['id']}"
+    message = (
+        f"The factory gave up on `{run['task']}` after {run['attempt']} attempts: the last, "
+        f"{last}, ended `{ended}`. Add `agent:{run['task']}` to try again from attempt 1."
+    )
+    ctx.github.post_comment(repo, number, tickets.render_notice(
+        message, [run["triggered_by"]] if run["triggered_by"] else None))
+    if run["task"] == "review":
+        ctx.github.add_labels(repo, number, ["agent:blocked"])
+        base.end(ctx, workflow, "stopped", int(run["ticket"]))
+    else:
+        base.end(ctx, workflow, "stopped", number, "agent:blocked")
+    log.info("gave up on %s#%s after run %s ended %s", repo, number, run["id"], ended,
+             extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
 
 
 def _explored(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[str, Any]) -> None:

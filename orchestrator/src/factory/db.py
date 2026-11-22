@@ -117,6 +117,11 @@ MIGRATIONS: list[str] = [
     ALTER TABLE runs ADD COLUMN shown_at TEXT;
     UPDATE runs SET shown_at = finished_at WHERE status = 'done';
     """,
+    # 8: why the orchestrator judged a run's result `invalid`, for the retry's
+    # previous_attempt.validation_error.
+    """
+    ALTER TABLE runs ADD COLUMN validation_error TEXT;
+    """,
 ]
 
 

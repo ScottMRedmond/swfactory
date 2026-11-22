@@ -203,9 +203,10 @@ def test_a_run_the_runner_refused_goes_back_to_the_queue(conn, runner):
     loop.tick(conn, runner, limit=1)
 
     r = row(conn, run_id)
-    assert (r["status"], r["attempt"], r["outcome"]) == ("dispatched", 1, None)
-    assert r["runner_run_id"] != first
-    assert len(runner.dispatched) == 2
+    # Dispatching then backs off (see test_attempts.py), so it isn't refused every tick.
+    assert (r["status"], r["attempt"], r["outcome"], r["runner_run_id"]) == (
+        "queued", 1, None, None)
+    assert len(runner.dispatched) == 1
 
 
 def test_a_run_the_runner_timed_out_is_timed_out(conn, runner):

@@ -14,20 +14,18 @@ comment only when the text changed. Editing notifies nobody.
 import json
 import logging
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
 from factory import brakes
+from factory.attempts import MAX_ATTEMPTS
 from factory.github import GitHub, GitHubError
 from factory.tickets import STATUS_MARK
 
 log = logging.getLogger(__name__)
 
-# At most this many attempts per ticket per task (orchestrator.md#limits-and-brakes).
-MAX_ATTEMPTS = 2
 
-DISABLED = "`enabled: false` in `.factory/config.yml`"
 
 # A spec's workflow kind, whose `pr` is the spec PR (orchestrator.md#implement-spec).
 SPEC_KIND = "implement-spec"
@@ -40,7 +38,7 @@ def sync(
     github: GitHub,
     *,
     limits: brakes.Limits,
-    held: Collection[str] = (),
+    held: Mapping[str, str] | None = None,
     now: datetime | None = None,
 ) -> None:
     """Bring the status comment of every issue or PR whose runs changed up to
@@ -72,15 +70,12 @@ def _subjects(row: sqlite3.Row) -> list[Subject]:
 
 
 def _holds(
-    conn: sqlite3.Connection, limits: brakes.Limits, held: Collection[str], now: datetime
+    conn: sqlite3.Connection, limits: brakes.Limits, held: Mapping[str, str] | None,
+    now: datetime,
 ) -> dict[int, str]:
     """Why each queued row is held back, by row id ("" for the next to go)."""
-    holds = {}
-    for row, reason in brakes.queue_holds(conn, limits, now):
-        if row["repo"] in held:
-            reason = DISABLED
-        holds[row["id"]] = "" if reason == brakes.NEXT else reason
-    return holds
+    return {row["id"]: "" if reason == brakes.NEXT else reason
+            for row, reason in brakes.queue_holds(conn, limits, now, held)}
 
 
 def _sync_one(

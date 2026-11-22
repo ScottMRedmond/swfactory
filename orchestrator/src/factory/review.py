@@ -10,6 +10,7 @@
   labels it and asks its human to review it.
 """
 
+import json
 import logging
 import sqlite3
 from dataclasses import replace
@@ -130,6 +131,20 @@ def finish(github: GitHub, repo: str, pr: int, *, needs_a_human: bool, reviewer:
     if reviewer and not github.request_review(repo, pr, reviewer):
         log.warning("couldn't request a review of %s#%s from %s", repo, pr, reviewer,
                     extra={"repo": repo, "ticket": str(pr)})
+
+
+def output_used(run: sqlite3.Row) -> bool:
+    """Whether a done review's output is acted on: it succeeded, or only its
+    fixes failed the check, the one case a failed result's output is used.
+    That case isn't retried: another review would cost a full run to produce
+    findings it already has."""
+    if run["task"] != "review" or run["result"] is None:
+        return False
+    if run["outcome"] == "succeeded":
+        return True
+    result = json.loads(run["result"])
+    return (run["outcome"] == "failed" and result.get("failure") == "check_failed"
+            and result.get("output") is not None)
 
 
 def changes_requested(output: dict[str, Any]) -> bool:
