@@ -570,3 +570,118 @@ describe("the agent's commits", () => {
     expect(unbundle(target, run).log("%s")).toBe("Add one.txt");
   });
 });
+
+describe("an auto-tickets run", () => {
+  const ticketsOutput = {
+    verdict: "decomposed",
+    tickets: [
+      {
+        title: "Store saved searches",
+        what_to_build: "A table and a model to create, list and delete saved searches.",
+        acceptance_criteria: ["A user can save the current query under a name"],
+        blocked_by: [],
+      },
+      {
+        title: "Show saved searches in the sidebar",
+        what_to_build: "List saved searches in the sidebar; clicking one runs it.",
+        acceptance_criteria: ["The sidebar lists saved searches by name"],
+        blocked_by: [0],
+        related: ["123"],
+      },
+    ],
+  };
+
+  const autoTicketsDispatch = (sha: string, extra: object = {}) => ({
+    contract_version: 1,
+    run_id: 431,
+    repo: "octo/widgets",
+    task: "auto-tickets",
+    ticket: "140",
+    ticket_markdown: "# Spec: saved searches\n\n## Spec exploration notes\n\nNotes.\n",
+    older_issues: [
+      { ticket: "123", title: "Search ignores accents" },
+      { ticket: "97", title: "Sidebar is slow" },
+    ],
+    base_sha: sha,
+    enrolment_sha: sha,
+    model: "claude-test-model",
+    timeout_minutes: 20,
+    ...extra,
+  });
+
+  it("skips setup, runs no check, bundles nothing and writes the tickets", () => {
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(
+        `${writeOutput(ticketsOutput)}\n${success}`,
+        "setup: echo setup-ran; exit 1\ncheck: echo check-ran\n",
+      ),
+    );
+
+    const run = runTask(autoTicketsDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toEqual({
+      contract_version: 1,
+      run_id: 431,
+      task: "auto-tickets",
+      outcome: "succeeded",
+      output: ticketsOutput,
+    });
+    expect(run.status).toBe(0);
+    expect(run.output).not.toContain("setup-ran");
+    expect(run.output).not.toContain("check-ran");
+    expect(existsSync(join(run.out, "branch.bundle"))).toBe(false);
+  });
+
+  it("prompts with /to-tickets' slicing rules and template but no quiz, and gives it the older issues", () => {
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(
+        `sed 's/^/prompt: /'\nsed 's/^/older: /' ${FACTORY}/older-issues.md\n` +
+          `${writeOutput(ticketsOutput)}\n${success}`,
+      ),
+    );
+
+    const run = runTask(autoTicketsDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result?.outcome, run.output).toBe("succeeded");
+    const prompt = run.output
+      .split("\n")
+      .filter((line) => line.startsWith("prompt: "))
+      .map((line) => line.slice("prompt: ".length))
+      .join("\n");
+    // From the /to-tickets skill, word for word.
+    expect(prompt).toContain("Each slice cuts a narrow but COMPLETE path through every layer");
+    expect(prompt).toContain("Wide refactors are the exception to vertical slicing.");
+    expect(prompt).toContain("## Acceptance criteria\n\n- [ ] Criterion 1");
+    expect(prompt).not.toMatch(/quiz|Iterate until the user approves/i);
+    expect(prompt).toContain(`${FACTORY}/older-issues.md`);
+    expect(prompt).toContain("Related: #M");
+    expect(prompt).toMatch(/more than 12/);
+    expect(prompt).toContain('"blocked_by"');
+    expect(run.output).toContain("older: - #123 Search ignores accents\nolder: - #97 Sidebar is slow\n");
+  });
+
+  it("gives tickets that aren't blockers-first back to the agent as invalid output", () => {
+    const [first, second] = ticketsOutput.tickets;
+    const backwards = { verdict: "decomposed", tickets: [{ ...first, blocked_by: [1] }, { ...second, blocked_by: [] }] };
+    const selfBlocked = { verdict: "decomposed", tickets: [first, { ...second, blocked_by: [1] }] };
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(`
+if [[ " $* " == *" --resume s-1 "* ]]; then
+  sed 's/^/resumed-with: /'
+  ${writeOutput(selfBlocked)}
+else
+  cat > /dev/null
+  ${writeOutput(backwards)}
+fi
+${success}`),
+    );
+
+    const run = runTask(autoTicketsDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toMatchObject({ outcome: "failed", failure: "invalid_output" });
+    expect(run.output).toMatch(/^resumed-with: .*\/tickets\/0\/blocked_by .*earlier ticket/m);
+  });
+});
