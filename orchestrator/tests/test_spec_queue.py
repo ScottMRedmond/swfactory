@@ -126,7 +126,7 @@ def test_built_lands_the_commits_on_the_integration_branch_and_labels_the_ticket
     assert git(remote.path, "rev-parse", f"{head}^") == before  # a fast-forward
     assert git(remote.path, "show", f"{head}:src/saved.py") == "store()"
     assert remote.remote_branch(json.loads(implement["dispatch"])["branch"]) is None
-    assert repo.pulls == {}
+    assert [p["head"] for p in repo.pulls.values()] == [BRANCH]  # the spec PR, none of its own
     assert first.state == "open"
     assert "agent:built" in first.labels and "agent:in-progress" not in first.labels
     [landed] = first.posts
