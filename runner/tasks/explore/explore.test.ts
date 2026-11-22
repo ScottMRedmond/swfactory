@@ -1,79 +1,30 @@
-// The explore task, tested from the outside like run-task.test.ts: a target
-// in a local bare repo, a fake `claude` in its enrolment, and the run script
-// as a subprocess. Needs git, Docker and factory-base:test
-// (`npm run build:image`); run with `npm run test:runner`.
+// The explore task, tested from the outside with the helpers in
+// runner/testing.ts: a fake `claude` in the target's enrolment, and the run
+// script as a subprocess. Run with `npm run test:runner`.
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
-const baseImage = process.env.FACTORY_BASE_IMAGE ?? "factory-base:test";
-const FACTORY = "/home/agent/factory";
-
-const git = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-
-// A target repo whose one commit holds the enrolment with a fake `claude`.
-const makeTarget = (fakeClaude: string, config: string) => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-target-"));
-  const bare = join(dir, "target.git");
-  const work = join(dir, "work");
-  git(dir, "init", "-q", "--bare", "-b", "main", bare);
-  git(dir, "init", "-q", "-b", "main", work);
-  const files: Record<string, string> = {
-    ".factory/Dockerfile": `FROM ${baseImage}\nCOPY --chmod=755 fake-claude /usr/local/bin/claude\n`,
-    ".factory/config.yml": config,
-    ".factory/fake-claude": `#!/bin/bash\nset -u\n${fakeClaude}\n`,
-    "app/search.py": "def search(q, names):\n    return [n for n in names if q in n]\n",
-  };
-  for (const [path, content] of Object.entries(files)) {
-    mkdirSync(dirname(join(work, path)), { recursive: true });
-    writeFileSync(join(work, path), content);
-  }
-  git(work, "add", "-A");
-  git(work, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init");
-  git(work, "push", "-q", bare, "HEAD:main");
-  return { url: bare, sha: git(work, "rev-parse", "HEAD") };
-};
+import { FACTORY, claudeEnv, fakeClaude, makeTarget, root, runTask, success, writeOutput } from "../../testing";
 
 // The valid explore dispatch from contracts/examples, pointed at the target.
+// Its run_id names the run's Docker image, so it's unique among the runner's
+// test files, which vitest runs in parallel.
 const exploreDispatch = (sha: string) => ({
   ...JSON.parse(readFileSync(join(root, "contracts/examples/dispatch/explore.valid.json"), "utf8")),
+  run_id: 424,
   base_sha: sha,
   enrolment_sha: sha,
 });
 
-const runExplore = (fakeClaude: string, config = 'setup: "true"\ncheck: echo checked\n') => {
-  const target = makeTarget(fakeClaude, config);
-  const dir = mkdtempSync(join(tmpdir(), "factory-run-"));
-  writeFileSync(join(dir, "dispatch.json"), JSON.stringify(exploreDispatch(target.sha)));
-  const out = join(dir, "out");
-  const proc = spawnSync(
-    "npx",
-    ["tsx", join(root, "runner/run-task.ts"), join(dir, "dispatch.json"), out, join(dir, "work")],
-    {
-      cwd: root,
-      encoding: "utf8",
-      env: { ...process.env, FACTORY_TARGET_URL: target.url, CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test" },
-    },
-  );
-  const resultPath = join(out, "result.json");
-  return {
-    status: proc.status,
-    output: proc.stdout + proc.stderr,
-    out,
-    result: existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : undefined,
-  };
+const runExplore = (script: string, config?: string) => {
+  const target = makeTarget();
+  const sha = target.commit({
+    ...fakeClaude(script, config),
+    "app/search.py": "def search(q, names):\n    return [n for n in names if q in n]\n",
+  });
+  return runTask(exploreDispatch(sha), target.url, claudeEnv);
 };
-
-const event = (data: object) => `echo '${JSON.stringify({ session_id: "s-1", ...data })}'`;
-const success = event({ type: "result", subtype: "success", is_error: false, result: "done" });
-const writeOutput = (output: object) =>
-  `cat > ${FACTORY}/output.json <<'JSON'\n${JSON.stringify(output)}\nJSON`;
 
 const easyCall = {
   verdict: "easy-call",
@@ -94,14 +45,14 @@ describe("an explore run", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 412,
+      run_id: 424,
       task: "explore",
       outcome: "succeeded",
       output: easyCall,
     });
     expect(run.output).toContain("ticket: # Search ignores accents");
-    expect(run.output).toContain("older: - 118: Search is slow on large lists");
-    expect(run.output).toContain("older: - 97: Unicode names sort wrongly");
+    expect(run.output).toContain("older: - #118 Search is slow on large lists");
+    expect(run.output).toContain("older: - #97 Unicode names sort wrongly");
     expect(run.output).toMatch(new RegExp(`^prompt: .*${FACTORY}/older-issues\\.md`, "m"));
     expect(run.output).toMatch(/^prompt: .*duplicate_of/m);
   });
@@ -116,7 +67,7 @@ describe("an explore run", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 412,
+      run_id: 424,
       task: "explore",
       outcome: "succeeded",
       output: easyCall,
