@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
-from factory import db, loop, orchestrator
+from factory import db, loop, orchestrator, state
 from factory.contract import parse_dispatch
 from factory.github import AppAuth, GitHub, GitHubError, Response
 from factory.runner import FakeRunner, RunFiles
@@ -328,6 +328,7 @@ def test_one_repo_failing_doesnt_stop_the_others(conn, fake, runner):
 
     assert [r["repo"] for r in runs(conn)] == ["octo/gadgets"]
     assert issue.labels == []
+    assert [repo for repo, _ in state.last_polls(conn)] == ["octo/gadgets"]  # for `factory status`
 
 
 def test_no_token_reaches_the_logs_over_a_whole_run(conn, github, fake, repo, runner, settings, caplog):

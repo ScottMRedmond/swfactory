@@ -65,6 +65,7 @@ class GitHubError(Exception):
 
     def __init__(self, request: Request, response: Response):
         self.status = response.status
+        self.headers = {k.lower(): v for k, v in response.headers.items()}
         try:
             message = (response.json() or {}).get("message", "")
         except (ValueError, AttributeError):
@@ -81,9 +82,16 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
-def _send(transport: Transport, token: str, method: str, url: str, body: Any = None) -> Response:
+def _send(
+    transport: Transport,
+    token: str,
+    method: str,
+    url: str,
+    body: Any = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
     data = None
-    headers = _headers(token)
+    headers = {**_headers(token), **(extra_headers or {})}
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
@@ -112,6 +120,10 @@ class AppAuth:
 
     def __repr__(self) -> str:
         return f"AppAuth(app_id={self._app_id})"
+
+    def forget(self) -> None:
+        """Drop every cached token, so the next call for each repo fetches a fresh one."""
+        self._tokens.clear()
 
     def _jwt(self) -> str:
         now = int(self._clock())
@@ -152,19 +164,40 @@ class GitHub:
     def __repr__(self) -> str:
         return f"GitHub({self._auth!r})"
 
-    def _call(self, repo: str, method: str, path: str, body: Any = None, **query: Any) -> Response:
+    def forget_tokens(self) -> None:
+        self._auth.forget()
+
+    def _call(
+        self,
+        repo: str,
+        method: str,
+        path: str,
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        **query: Any,
+    ) -> Response:
         url = f"{API}/repos/{repo}{path}"
         if query:
             url += "?" + urlencode(query)
-        return _send(self._transport, self._auth.token(repo), method, url, body)
+        return _send(self._transport, self._auth.token(repo), method, url, body, headers)
+
+    def _pages(self, repo: str, first: Response, **query: Any) -> list[dict[str, Any]]:
+        """The first page's items plus those of every page after it."""
+        items: list[dict[str, Any]] = list(first.json())
+        response, page = first, 1
+        while 'rel="next"' in response.headers.get("Link", ""):
+            page += 1
+            response = self._call(repo, "GET", "/issues", **query, page=page)
+            items += response.json()
+        return items
 
     def default_branch_head(self, repo: str) -> str:
         """The commit at the head of the repo's default branch."""
         branch = self._call(repo, "GET", "").json()["default_branch"]
         return self._call(repo, "GET", f"/branches/{quote(branch, safe='')}").json()["commit"]["sha"]
 
-    def _pages(self, repo: str, path: str, **query: Any) -> Iterator[dict[str, Any]]:
-        """Every item of a paged list, fetched a page at a time as they're consumed."""
+    def _each(self, repo: str, path: str, **query: Any) -> Iterator[dict[str, Any]]:
+        """Every item of the paged list at `path`, fetched a page at a time as they're consumed."""
         page = 1
         while True:
             response = self._call(repo, "GET", path, per_page=100, page=page, **query)
@@ -181,19 +214,19 @@ class GitHub:
 
     def open_issues_with_label(self, repo: str, label: str) -> list[dict[str, Any]]:
         """Open issues and PRs carrying `label` (a PR has a `pull_request` key)."""
-        return list(self._pages(repo, "/issues", state="open", labels=label))
+        return list(self._each(repo, "/issues", state="open", labels=label))
 
     def open_issues_newest_first(self, repo: str) -> Iterator[dict[str, Any]]:
         """Open issues and PRs, newest first, fetched a page at a time as consumed."""
-        return self._pages(repo, "/issues", state="open", sort="created", direction="desc")
+        return self._each(repo, "/issues", state="open", sort="created", direction="desc")
 
     def issue_comments(self, repo: str, number: int) -> list[dict[str, Any]]:
         """An issue's or PR's comments, oldest first."""
-        return list(self._pages(repo, f"/issues/{number}/comments"))
+        return list(self._each(repo, f"/issues/{number}/comments"))
 
     def issue_events(self, repo: str, number: int) -> list[dict[str, Any]]:
         """An issue's events (`closed`, `reopened`, `labeled`, ...), oldest first."""
-        return list(self._pages(repo, f"/issues/{number}/events"))
+        return list(self._each(repo, f"/issues/{number}/events"))
 
     def permission(self, repo: str, login: str) -> str:
         """`admin`, `write` (maintain shows as write), `read` or `none`."""
@@ -204,6 +237,28 @@ class GitHub:
             if e.status == 404:
                 return "none"
             raise
+    def open_issues(self, repo: str) -> list[dict[str, Any]]:
+        """Every open issue and PR (a PR has a `pull_request` key)."""
+        query = {"state": "open", "per_page": 100}
+        return self._pages(repo, self._call(repo, "GET", "/issues", **query), **query)
+
+    def issues_since(
+        self, repo: str, since: str, etag: str | None
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Issues and PRs, open or closed, updated at or after `since` (ISO 8601).
+
+        Sent with `etag` as If-None-Match: if nothing changed GitHub answers
+        304, which doesn't count against the rate limit, and this returns
+        `(None, etag)`. Otherwise it returns the issues and the new ETag.
+        """
+        query = {"state": "all", "since": since, "sort": "updated",
+                 "per_page": 100}
+        headers = {"If-None-Match": etag} if etag else None
+        first = self._call(repo, "GET", "/issues", headers=headers, **query)
+        if first.status == 304:
+            return None, etag
+        new_etag = next((v for k, v in first.headers.items() if k.lower() == "etag"), None)
+        return self._pages(repo, first, **query), new_etag
 
     def get_issue(self, repo: str, number: int) -> dict[str, Any]:
         return self._call(repo, "GET", f"/issues/{number}").json()
