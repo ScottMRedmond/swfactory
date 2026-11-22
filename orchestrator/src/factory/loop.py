@@ -58,6 +58,9 @@ TIMEOUT_GRACE = timedelta(minutes=15)
 # After the runner refuses a run (on Actions: the spending limit), dispatching
 # waits this long, so the refused row isn't dispatched again every tick.
 REFUSED_BACKOFF = timedelta(minutes=15)
+# A row claimed for dispatching this long ago that never got a runner run id
+# was left by a process that died mid-dispatch.
+CLAIM_STALE = timedelta(minutes=10)
 # A runner unavailable this long is a factory problem.
 UNAVAILABLE_PROBLEM_AFTER = timedelta(minutes=30)
 
@@ -149,6 +152,7 @@ def cancel_requested(
     human closing its issue or PR."""
     rows = conn.execute(
         """SELECT * FROM runs WHERE cancel_requested_at IS NOT NULL
+           AND (status = 'queued' OR runner_run_id IS NOT NULL)
            AND status IN ('queued', 'dispatched') ORDER BY id"""
     ).fetchall()
     for row in rows:
@@ -176,8 +180,10 @@ def collect(
     `check` judges a succeeded result further (see `Check`).
     """
     now = now or datetime.now(UTC)
+    _release_stale_claims(conn, now)
     rows = conn.execute(
-        "SELECT * FROM runs WHERE status = 'dispatched' AND (? IS NULL OR id = ?) ORDER BY id",
+        """SELECT * FROM runs WHERE status = 'dispatched' AND runner_run_id IS NOT NULL
+           AND (? IS NULL OR id = ?) ORDER BY id""",
         (only, only),
     ).fetchall()
     for row in rows:
@@ -204,6 +210,20 @@ def collect(
             _unavailable(conn, now)
             log.warning("runner unavailable while collecting run %s: %s", row["id"], e,
                         extra=_about(row))
+
+
+def _release_stale_claims(conn: sqlite3.Connection, now: datetime) -> None:
+    """A row claimed for dispatching (`dispatch_run`) whose process died before
+    the runner answered goes back to the queue."""
+    rows = conn.execute(
+        """SELECT * FROM runs WHERE status = 'dispatched' AND runner_run_id IS NULL
+           AND dispatched_at < ?""",
+        (_iso(now - CLAIM_STALE),),
+    ).fetchall()
+    for row in rows:
+        log.warning("run %s was claimed for dispatching but never dispatched; queueing it again",
+                    row["id"], extra=_about(row))
+        _release(conn, row["id"])
 
 
 def _collect_one(
@@ -384,24 +404,47 @@ def dispatch(
 
 def dispatch_run(
     conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, prepare: Prepare | None = None
-) -> None:
-    """Dispatch one queued row, whatever the limits. Raises `RunnerUnavailable`
-    or `TryLater` (the row stays queued then)."""
+) -> bool:
+    """Dispatch one queued row, whatever the limits. False if another process
+    (`factory serve` and `factory doctor` share the database) claimed it first,
+    so it isn't sent twice. Raises `RunnerUnavailable` or `TryLater` (the row
+    stays queued then)."""
     sent = json.loads(row["dispatch"])
     if prepare is not None and (fresh := prepare(row)) is not None:
         sent = fresh
-        # Stored first: the row keeps what the run was actually sent.
-        with conn:
-            conn.execute("UPDATE runs SET dispatch = ? WHERE id = ? AND status = 'queued'",
-                         (json.dumps(sent), row["id"]))
-    runner_run_id = runner.dispatch(row["repo"], sent)
+    # Claimed before the runner is asked: `dispatched` with no runner_run_id
+    # yet. The row keeps what the run was actually sent.
+    with conn:
+        claimed = conn.execute(
+            """UPDATE runs SET status = 'dispatched', dispatch = ?, dispatched_at = ?
+               WHERE id = ? AND status = 'queued'""",
+            (json.dumps(sent), _now(), row["id"]),
+        ).rowcount
+    if not claimed:
+        log.info("run %s was dispatched by someone else", row["id"], extra=_about(row))
+        return False
+    try:
+        runner_run_id = runner.dispatch(row["repo"], sent)
+    except BaseException:
+        _release(conn, row["id"])
+        raise
     log_url = runner.log_link(row["repo"], runner_run_id)
     with conn:
         conn.execute(
-            """UPDATE runs SET status = 'dispatched', runner_run_id = ?, log_url = ?,
-                               dispatched_at = ?
+            """UPDATE runs SET runner_run_id = ?, log_url = ?, dispatched_at = ?
                WHERE id = ?""",
             (runner_run_id, log_url, _now(), row["id"]),
+        )
+    return True
+
+
+def _release(conn: sqlite3.Connection, run_id: int) -> None:
+    """Put a claimed row that never reached the runner back in the queue."""
+    with conn:
+        conn.execute(
+            """UPDATE runs SET status = 'queued', dispatched_at = NULL
+               WHERE id = ? AND status = 'dispatched' AND runner_run_id IS NULL""",
+            (run_id,),
         )
 
 

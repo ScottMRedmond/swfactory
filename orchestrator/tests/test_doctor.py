@@ -250,6 +250,51 @@ def test_a_smoke_run_doesnt_count_against_the_daily_cap(d):
     assert brakes.daily_count(d.conn, datetime.now(UTC)) == 0
 
 
+def test_a_serve_dispatching_the_smoke_run_first_doesnt_start_a_second_run(d, tmp_path,
+                                                                            monkeypatch):
+    """A running `factory serve` can tick between doctor queueing the smoke run
+    and dispatching it: the run goes out once, and doctor waits on it."""
+    healthy(d.fake)
+    serve = db.connect(tmp_path / "factory.db")
+    enqueue = loop.enqueue
+
+    def enqueue_then_serve_ticks(conn, **kwargs):
+        run_id = enqueue(conn, **kwargs)
+        loop.tick(serve, d.runner, limit=2)
+        return run_id
+
+    monkeypatch.setattr(loop, "enqueue", enqueue_then_serve_ticks)
+
+    code = d.run()
+    serve.close()
+
+    assert code == 0
+    [(rid, dispatch)] = d.runner.dispatched
+    row = loop.get_run(d.conn, dispatch["run_id"])
+    assert (row["runner_run_id"], row["outcome"]) == (rid, "succeeded")
+    assert f"smoke run {row['id']} succeeded" in d.report
+
+
+def test_a_serve_ticking_while_doctor_dispatches_leaves_the_smoke_run_alone(d, tmp_path):
+    healthy(d.fake)
+    serve = db.connect(tmp_path / "factory.db")
+    dispatch = d.runner.dispatch
+
+    def serve_ticks_meanwhile(repo, sent):
+        loop.tick(serve, d.runner, limit=2)
+        return dispatch(repo, sent)
+
+    d.runner.dispatch = serve_ticks_meanwhile
+
+    code = d.run()
+    serve.close()
+
+    assert code == 0
+    [(rid, sent)] = d.runner.dispatched
+    row = loop.get_run(d.conn, sent["run_id"])
+    assert (row["runner_run_id"], row["outcome"]) == (rid, "succeeded")
+
+
 def test_the_command_needs_the_app_id_and_key(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("FACTORY_APP_ID", raising=False)
     monkeypatch.delenv("FACTORY_APP_KEY_FILE", raising=False)

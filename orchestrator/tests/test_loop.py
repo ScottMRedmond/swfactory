@@ -2,6 +2,7 @@
 collected and their result.json validated."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,27 @@ def test_runs_in_flight_count_against_the_limit(conn, runner):
     finish(runner, conn, first, smoke_result(first))
     loop.tick(conn, runner, limit=1)
     assert row(conn, second)["status"] == "dispatched"
+
+
+def test_a_row_someone_else_dispatched_isnt_dispatched_again(conn, runner):
+    run_id = enqueue_smoke(conn)
+    stale = row(conn, run_id)
+    loop.tick(conn, runner, limit=2)
+
+    assert loop.dispatch_run(conn, runner, stale) is False
+
+    assert len(runner.dispatched) == 1
+
+
+def test_a_claim_left_by_a_process_that_died_mid_dispatch_is_queued_again(conn, runner):
+    run_id = enqueue_smoke(conn)
+    claimed_at = (datetime.now(UTC) - timedelta(minutes=11)).isoformat(timespec="seconds")
+    conn.execute("UPDATE runs SET status = 'dispatched', dispatched_at = ? WHERE id = ?",
+                 (claimed_at, run_id))
+
+    loop.tick(conn, runner, limit=2)
+
+    assert row(conn, run_id)["runner_run_id"] == runner.dispatched[0][0]
 
 
 # --- collecting -------------------------------------------------------------
