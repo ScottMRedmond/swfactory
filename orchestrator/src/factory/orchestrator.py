@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import enrolment as enrolments
-from factory import loop, triggers, workflows
+from factory import brakes, loop, status_comment, triggers, workflows
 from factory import state as db_state
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
@@ -330,8 +330,11 @@ def run_once(
     Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
     """
     (poller or Poller()).poll_all(conn, github, settings)
-    loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn))
+    held = enrolments.held(conn)
+    loop.tick(conn, runner, limit=settings.max_in_flight, held=held)
     handle_finished(conn, github, runner, settings)
+    status_comment.sync(conn, github, held=held,
+                        limits=brakes.Limits(max_in_flight=settings.max_in_flight))
 
 
 def handle_finished(
