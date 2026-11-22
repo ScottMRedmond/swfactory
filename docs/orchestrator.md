@@ -8,7 +8,7 @@ The orchestrator is written in **Python**. Its language is independent of the ta
 
 On the family Mac mini (M2, 24 GB), which is on most of the time.
 
-- It runs under a dedicated `factory` macOS user, so other non-admin family accounts can't read its secrets.
+- It runs under a dedicated `SWFactory` macOS user, so other non-admin family accounts can't read its secrets.
 - launchd starts it at boot and restarts it when it crashes.
 - The Mac mini may sleep. Runs happen on the runner, not the Mac mini, so a run in flight keeps going and its files wait on the runner; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
 - It is managed from the development laptop over SSH, with Tailscale if you need access from away from home.
@@ -97,7 +97,7 @@ When a run starts on a ticket or PR, the orchestrator removes any stale status l
 
 ## Reading Claude usage
 
-Before each dispatch, the orchestrator reads the Claude subscription's usage with `claude -p "/usage" --output-format stream-json --verbose`, which makes no model call, and reuses a reading less than 5 minutes old. With about 20 runs a day, that's a few dozen checks a day; the usage endpoint can itself be rate limited and publishes no safe rate. Claude Code is installed under the `factory` user with a full `claude auth login`, because `/usage` needs the `user:profile` scope. Tested: with a full login it returns a `usage_report` whose `rate_limits.limits[]` has `session` and `weekly_all` rows; with a `setup-token` token (Claude Code 2.1.330) it prints only the session's cost summary, with no `usage_report` at all. The orchestrator uses Claude Code only to read usage, never to run a model. The runners keep their `setup-token` token. See [Usage pause](#limits-and-brakes) for what it does with the reading, and `research/claude-usage-from-script.md` for the sources.
+Before each dispatch, the orchestrator reads the Claude subscription's usage with `claude -p "/usage" --output-format stream-json --verbose`, which makes no model call, and reuses a reading less than 5 minutes old. With about 20 runs a day, that's a few dozen checks a day; the usage endpoint can itself be rate limited and publishes no safe rate. Claude Code is installed under the `SWFactory` user with a full `claude auth login`, because `/usage` needs the `user:profile` scope. Tested: with a full login it returns a `usage_report` whose `rate_limits.limits[]` has `session` and `weekly_all` rows; with a `setup-token` token (Claude Code 2.1.330) it prints only the session's cost summary, with no `usage_report` at all. The orchestrator uses Claude Code only to read usage, never to run a model. The runners keep their `setup-token` token. See [Usage pause](#limits-and-brakes) for what it does with the reading, and `research/claude-usage-from-script.md` for the sources.
 
 ## Identity
 
@@ -402,7 +402,7 @@ The daily cap and a usage pause never open one: they're the factory working as d
 
 **Down or asleep.** There's no alert in v1. A dead-man's switch would fire every time the Mac mini sleeps, which it is meant to do. If nothing seems to be happening, `factory status` shows when the last poll ran, and launchd restarts the orchestrator after a crash.
 
-**The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `factory` user (password login off), e.g. `ssh factory@macmini factory status`, from a phone too through Tailscale.
+**The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `SWFactory` user (password login off), e.g. `ssh SWFactory@macmini factory status`, from a phone too through Tailscale.
 
 - `factory status`: whether the factory is paused, the latest usage reading and its age, today's count against the cap, runs in flight, the queue (oldest first, with why each is held), the last successful poll per repo, and open factory problems.
 - `factory runs`: the last 20 rows, filtered with `--repo`, `--ticket`, `--task`, `--outcome` and `--since`, or `--json`. `factory runs <id>` shows one row in full: dispatch, result, the check output's tail, the retry chain, and the log link.
