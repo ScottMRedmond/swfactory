@@ -69,10 +69,9 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # The App's bot identity, which authors every commit an agent makes.
           # The email is <bot user id>+<name>@users.noreply.github.com; the
-          # id is `gh api '/users/<app-slug>%5Bbot%5D' --jq .id`. Until these
-          # are filled in, implement and review runs fail with setup_failed.
-          FACTORY_BOT_NAME: ""
-          FACTORY_BOT_EMAIL: ""
+          # id is `gh api '/users/<app-slug>%5Bbot%5D' --jq .id`.
+          FACTORY_BOT_NAME: "swfactory-bot[bot]"
+          FACTORY_BOT_EMAIL: "359948932+swfactory-bot[bot]@users.noreply.github.com"
         run: |
           printf '%s' "$DISPATCH" > "$RUNNER_TEMP/dispatch.json"
           cd .factory-runner
