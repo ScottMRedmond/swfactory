@@ -39,6 +39,7 @@ import { loadContracts, type Contract, type Contracts } from "./contract";
 import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
 import { expandIncludes } from "./prompt-includes";
 import { blockersFirst } from "./tasks/auto-tickets/output";
+import * as review from "./tasks/review/review";
 
 const RUNNER = dirname(fileURLToPath(import.meta.url));
 
@@ -57,6 +58,10 @@ type Dispatch = {
   branch?: string;
   triggered_by?: TriggeredBy;
   older_issues?: { ticket: string; title: string }[];
+  // Review only.
+  pr_number?: number;
+  pr_base_sha?: string;
+  findings_only?: boolean;
 };
 
 type Check = { passed: boolean; output_tail: string };
@@ -68,6 +73,9 @@ type Result = {
   outcome: "succeeded" | "failed";
   failure?: string;
   check?: Check;
+  check_before?: Check;
+  check_after?: Check;
+  instructions_changed?: true;
   output?: object;
 };
 
@@ -138,7 +146,7 @@ const checkout = (dispatch: Dispatch, work: string) => {
   mustRun("setup_failed", "git", ["init", "-q", target]);
   mustRun("setup_failed", "git", [
     "-C", target, ...auth, "fetch", "-q", "--no-tags", url,
-    dispatch.base_sha, dispatch.enrolment_sha,
+    dispatch.base_sha, dispatch.enrolment_sha, ...(dispatch.pr_base_sha ? [dispatch.pr_base_sha] : []),
   ]);
   mustRun("setup_failed", "git", ["-C", target, "checkout", "-q", "--detach", dispatch.base_sha]);
   const archive = spawnSync("git", ["-C", target, "archive", dispatch.enrolment_sha, ".factory"]);
@@ -149,7 +157,7 @@ const checkout = (dispatch: Dispatch, work: string) => {
   return { target, factoryDir: join(enrolment, ".factory") };
 };
 
-type Enrolment = { setup: string; check: string };
+type Enrolment = { setup: string; check: string; test_paths?: string[] };
 
 const readEnrolment = (contract: Contract, factoryDir: string): Enrolment => {
   let config: unknown;
@@ -211,10 +219,15 @@ const startContainer = (image: string, target: string) => {
   return { id, sh, stop };
 };
 
+const runCheck = (container: ReturnType<typeof startContainer>, enrolment: Enrolment): Check => {
+  const result = container.sh("check", enrolment.check);
+  return { passed: result.status === 0, output_tail: outputTail(result.output) };
+};
+
 const AGENT_TASKS = ["explore", "implement", "review", "auto-tickets"];
-// Tasks whose result carries a `check` (review's check_before/check_after
-// and its other steps are the review task's).
-const CHECKED_TASKS = ["implement", "smoke"];
+// Tasks that run the check after the agent. Review's result calls it
+// check_after, and review also runs it before (tasks/review/review.ts).
+const CHECKED_TASKS = ["implement", "review", "smoke"];
 // Auto-tickets only reads the repo and writes text, so it needs no setup.
 const NO_SETUP_TASKS = ["auto-tickets"];
 // Rules a task's output must follow that its JSON Schema can't express.
@@ -279,6 +292,8 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
 
   let failure: string | undefined;
   let check: Check | undefined;
+  let checkBefore: Check | undefined;
+  let instructionsChanged = false;
   let output: object | undefined;
   let container: ReturnType<typeof startContainer> | undefined;
   let enrolment: Enrolment | undefined;
@@ -286,12 +301,25 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
   try {
     const { target, factoryDir } = checkout(dispatch, work);
     enrolment = readEnrolment(contract, factoryDir);
+    if (dispatch.task === "review") {
+      try {
+        instructionsChanged = review.prepareCheckout(target, dispatch.pr_base_sha!);
+      } catch (error) {
+        throw new RunFailure("setup_failed", String(error));
+      }
+    }
     // Tasks that commit need the bot identity before anything runs.
     const identity = dispatch.branch === undefined ? undefined : botIdentity();
     if (typeof identity === "string") throw new RunFailure("setup_failed", identity);
     container = startContainer(buildImage(dispatch, factoryDir), target);
     if (!NO_SETUP_TASKS.includes(dispatch.task) && container.sh("setup", enrolment.setup).status !== 0) {
       throw new RunFailure("setup_failed", "setup failed");
+    }
+    // Review checks the PR as it came, so a failing PR reaches the agent as
+    // something to fix.
+    if (dispatch.task === "review") {
+      checkBefore = runCheck(container, enrolment);
+      putFile(container.id, review.BRIEF, review.brief(dispatch, enrolment, checkBefore));
     }
     if (dispatch.branch !== undefined && identity && dispatch.triggered_by) {
       openBranch(container.id, WORKSPACE, dispatch.branch, identity);
@@ -309,9 +337,12 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
   }
 
   // Steps 5-7 run whatever happened above, as long as there's somewhere to
-  // run them.
+  // run them. A findings-only review uploads no commits, so there's nothing
+  // to check after it either.
+  const findingsOnly = dispatch.task === "review" && dispatch.findings_only === true;
+  const checkAfter = CHECKED_TASKS.includes(dispatch.task) && !findingsOnly;
   try {
-    if (container && branch) {
+    if (container && branch && !findingsOnly) {
       // Even after a timeout: a partial bundle is still worth uploading.
       try {
         bundleBranch(container.id, WORKSPACE, {
@@ -326,20 +357,28 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
         failure ??= "agent_error";
       }
     }
-    if (container && enrolment && CHECKED_TASKS.includes(dispatch.task)) {
-      const result = container.sh("check", enrolment.check);
-      check = { passed: result.status === 0, output_tail: outputTail(result.output) };
+    if (container && enrolment && checkAfter) {
+      if (dispatch.task === "review") review.cleanWorkspace(container.id, WORKSPACE);
+      check = runCheck(container, enrolment);
       if (!check.passed) failure ??= "check_failed";
     }
   } finally {
     container?.stop();
   }
 
+  const checks =
+    dispatch.task === "review"
+      ? {
+          ...(checkBefore && { check_before: checkBefore }),
+          ...(check && { check_after: check }),
+          ...(instructionsChanged && { instructions_changed: true as const }),
+        }
+      : { ...(check && { check }) };
   // A failed result keeps the agent's output if it wrote a valid one (a
   // failed check); the orchestrator decides whether to use it.
   return failure
-    ? { ...base, outcome: "failed", failure, ...(check && { check }), ...(output && { output }) }
-    : { ...base, outcome: "succeeded", ...(check && { check }), output: output ?? {} };
+    ? { ...base, outcome: "failed", failure, ...checks, ...(output && { output }) }
+    : { ...base, outcome: "succeeded", ...checks, output: output ?? {} };
 };
 
 class Rejected extends Error {}
