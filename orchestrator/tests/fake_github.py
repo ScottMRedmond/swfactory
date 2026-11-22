@@ -488,7 +488,9 @@ class FakeGitHub:
 
     def _list_pulls(self, owner, name, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
-        found = [{"number": p["number"], "head": {"ref": p["head"]}} for p in repo.pulls.values()
+        found = [{"number": p["number"], "head": {"ref": p["head"]},
+                  "user": {"login": repo.issues[p["number"]].author}}
+                 for p in repo.pulls.values()
                  if p["state"] == query.get("state", "open")
                  and ("head" not in query or query["head"] == f"{owner}:{p['head']}")]
         return _json(200, found)
@@ -521,6 +523,7 @@ class FakeGitHub:
         return _json(200, {"number": pr["number"],
                            "node_id": self._pull_node_id(f"{owner}/{name}", pr["number"]),
                            "title": pr["title"], "draft": pr["draft"], "state": pr["state"],
+                           "merged": pr.get("merged", False),
                            "head": {"ref": pr["head"], "sha": pr["head_sha"],
                                     "repo": {"full_name": pr["head_repo"]}},
                            "base": {"ref": pr["base"], "sha": pr["base_sha"]}})

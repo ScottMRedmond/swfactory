@@ -1,15 +1,17 @@
 """The implement-ticket workflow: explore -> implement -> review, for one ticket
 and one PR (orchestrator.md#implement-ticket).
 
-A human starts it with `agent:explore`, or reviews its PR again with
-`agent:review` (joining it with `agent:implement` is a later ticket's). Explore's verdict decides what happens
+A human starts it with `agent:explore`, joins it at implement with
+`agent:implement` (refused while the ticket has an open factory PR), or reviews
+its PR again with `agent:review`. Explore's verdict decides what happens
 next (orchestrator.md#explore): `easy-call` queues implement; the others stop
 the workflow. Implement starts from the default branch's head at dispatch
 time; `built` pushes its checked bundle to `factory/<ticket>-<run id>` and
 opens a draft PR, `needs-a-human` pushes nothing and stops the workflow
 (orchestrator.md#implement). `built` also queues review of the PR, whose
 fixes are pushed without force before one verdict comment is posted and the
-PR marked ready (orchestrator.md#review).
+PR marked ready (orchestrator.md#review). A PR closed without merging cancels
+the workflow (`cancel_closed_prs`).
 """
 
 import json
@@ -78,6 +80,116 @@ def start_explore(
              extra=about_run(id=run_id, repo=repo, ticket=ticket))
     base.mark_in_progress(github, repo, issue["number"])
     return run_id
+
+
+def start_implement(
+    conn: sqlite3.Connection,
+    github: GitHub,
+    settings: "Settings",
+    issue: dict[str, Any],
+    enrolment: Enrolment,
+    triggered_by: "Added | None",
+) -> int | None:
+    """A human added `agent:implement` to a ticket: the ticket's workflow
+    joins at implement, skipping explore. Returns the run id, or None when a
+    notice says why nothing was queued."""
+    repo, number = enrolment.repo, issue["number"]
+    ticket = str(number)
+    if triggered_by is None or triggered_by.id is None:
+        # Implement's commits credit whoever triggered the work; here no one is known.
+        github.post_comment(repo, number, tickets.render_notice(
+            "The issue's events don't say who added `agent:implement`, so nothing was started. "
+            "Add it again."))
+        return None
+    pr = open_factory_pr(conn, github, repo, number)
+    if pr is not None:
+        # Force-pushing would lose commits added since, and a second PR would
+        # leave two to choose between.
+        github.post_comment(repo, number, tickets.render_notice(
+            f"This ticket already has an open factory PR, #{pr}, so `agent:implement` was "
+            "removed and nothing was started. To rebuild it, close the PR and add "
+            "`agent:implement` again.", [triggered_by.login]))
+        log.info("%s#%s already has factory PR #%s: implement not queued", repo, ticket, pr,
+                 extra={"repo": repo, "ticket": ticket})
+        return None
+    workflow_id = base.start(conn, repo=repo, kind=KIND, subject=ticket)
+    try:
+        run_id = _enqueue_implement(conn, github, settings, issue, repo, workflow_id,
+                                    (triggered_by.login, triggered_by.id))
+    except tickets.TooBig as e:
+        github.post_comment(repo, number,
+                            tickets.render_too_big_notice(str(e), triggered_by.login))
+        workflow = base.get(conn, workflow_id)
+        assert workflow is not None
+        base.end(Context(conn, github, cast(Runner, None), settings), workflow, "stopped", number)
+        log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
+        return None
+    log.info("queued implement run %s for %s#%s", run_id, repo, ticket,
+             extra=about_run(id=run_id, repo=repo, ticket=ticket))
+    base.mark_in_progress(github, repo, number)
+    return run_id
+
+
+def open_factory_pr(conn: sqlite3.Connection, github: GitHub, repo: str, number: int) -> int | None:
+    """The ticket's open factory PR, if it has one: the PR in its workflow's
+    row, or, if the row has none (e.g. the database was lost), an open PR the
+    App opened whose closing references include the ticket."""
+    row = conn.execute(
+        "SELECT pr FROM workflows WHERE repo = ? AND kind = ? AND subject = ? AND pr IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (repo, KIND, str(number)),
+    ).fetchone()
+    if row is not None and github.pull(repo, row["pr"])["state"] == "open":
+        return int(row["pr"])
+    app = github.app_login()
+    for pull in github.open_pulls(repo):
+        if (pull.get("user") or {}).get("login") == app and number in github.closing_issues(
+                repo, pull["number"]):
+            return int(pull["number"])
+    return None
+
+
+def cancel_closed_prs(
+    conn: sqlite3.Connection, github: GitHub, settings: "Settings", repo: str,
+    issues: list[dict[str, Any]], *, full_scan: bool,
+) -> None:
+    """End the workflow of each factory PR a human closed without merging:
+    `cancelled`, `agent:in-progress` off the ticket, and a notice on the
+    ticket if it's still open. Its review's rows are cancelled by
+    `orchestrator.cancel_closed`, which runs first.
+
+    `issues` is what the poll found, as for `cancel_closed`. A full scan only
+    lists open issues and PRs, so it looks at workflows whose PR is missing
+    from it but whose ticket is there: a merged PR closes its ticket."""
+    rows = conn.execute(
+        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
+        "AND status IN ('active', 'done') ORDER BY id",
+        (repo, KIND),
+    ).fetchall()
+    if full_scan:
+        open_numbers = {i["number"] for i in issues}
+        closed = [w for w in rows
+                  if w["pr"] not in open_numbers and int(w["subject"]) in open_numbers]
+    else:
+        closed_prs = {i["number"] for i in issues
+                      if "pull_request" in i and i.get("state") == "closed"}
+        closed = [w for w in rows if w["pr"] in closed_prs]
+    for workflow in closed:
+        pull = github.pull(repo, workflow["pr"])
+        if pull["state"] != "closed" or pull.get("merged"):
+            continue
+        number = int(workflow["subject"])
+        if github.get_issue(repo, number)["state"] == "open":
+            last = conn.execute(
+                "SELECT triggered_by FROM runs WHERE workflow_id = ? AND triggered_by IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1", (workflow["id"],)).fetchone()
+            github.post_comment(repo, number, tickets.render_notice(
+                f"PR #{workflow['pr']} was closed without merging, so the factory stopped "
+                "working on this ticket. Add `agent:implement` to rebuild it.",
+                [last["triggered_by"]] if last else None))
+        base.end(Context(conn, github, cast(Runner, None), settings), workflow, "cancelled", number)
+        log.info("%s#%s, the PR of #%s, was closed without merging: workflow cancelled", repo,
+                 workflow["pr"], number, extra={"repo": repo, "ticket": workflow["subject"]})
 
 
 def start_review(
@@ -449,7 +561,23 @@ def _queue_implement(ctx: Context, after: sqlite3.Row, issue: dict[str, Any]) ->
     ).fetchone():
         return
     repo, ticket = after["repo"], after["ticket"]
-    enrolment = enrolments.get(ctx.conn, repo)
+    run_id = _enqueue_implement(ctx.conn, ctx.github, ctx.settings, issue, repo,
+                                after["workflow_id"],
+                                (after["triggered_by"], after["triggered_by_id"]))
+    log.info("queued implement run %s for %s#%s after explore run %s", run_id, repo, ticket,
+             after["id"], extra=about_run(id=run_id, repo=repo, ticket=ticket))
+
+
+def _enqueue_implement(
+    conn: sqlite3.Connection, github: GitHub, settings: "Settings", issue: dict[str, Any],
+    repo: str, workflow_id: int, triggered_by: tuple[str, int],
+) -> int:
+    """Queue implement for `issue` in workflow `workflow_id`, crediting
+    `triggered_by` (login, user id). Raises `tickets.TooBig` if the ticket is
+    too big to dispatch."""
+    ticket = str(issue["number"])
+    login, user = triggered_by
+    enrolment = enrolments.get(conn, repo)
     assert enrolment is not None  # an unenrolled repo's runs are never handled
     dispatch = tickets.fit(
         {
@@ -457,22 +585,19 @@ def _queue_implement(ctx: Context, after: sqlite3.Row, issue: dict[str, Any]) ->
             "repo": repo,
             "task": "implement",
             "ticket": ticket,
-            "base_sha": ctx.github.default_branch_head(repo),
+            "base_sha": github.default_branch_head(repo),
             # Sized with the longest run id; `enqueue` names it with the real one.
             "branch": _branch(ticket, tickets.RUN_ID_ROOM),
-            "triggered_by": {"login": after["triggered_by"], "id": after["triggered_by_id"]},
+            "triggered_by": {"login": login, "id": user},
             "enrolment_sha": enrolment.sha,
-            "model": ctx.settings.model("implement", enrolment),
-            "timeout_minutes": ctx.settings.timeout("implement", enrolment),
+            "model": settings.model("implement", enrolment),
+            "timeout_minutes": settings.timeout("implement", enrolment),
         },
-        tickets.fetch(ctx.github, repo, issue),
+        tickets.fetch(github, repo, issue),
     )
-    run_id = loop.enqueue(ctx.conn, repo=repo, task="implement", ticket=ticket, dispatch=dispatch,
-                          workflow_id=after["workflow_id"], triggered_by=after["triggered_by"],
-                          triggered_by_id=after["triggered_by_id"],
-                          branch=lambda run_id: _branch(ticket, run_id))
-    log.info("queued implement run %s for %s#%s after explore run %s", run_id, repo, ticket,
-             after["id"], extra=about_run(id=run_id, repo=repo, ticket=ticket))
+    return loop.enqueue(conn, repo=repo, task="implement", ticket=ticket, dispatch=dispatch,
+                        workflow_id=workflow_id, triggered_by=login, triggered_by_id=user,
+                        branch=lambda run_id: _branch(ticket, run_id))
 
 
 def _branch(ticket: str, run_id: int) -> str:

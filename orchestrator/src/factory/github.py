@@ -427,6 +427,10 @@ class GitHub:
         """A PR as the pulls API gives it (`node_id`, `draft`, `head`, `base`, ...)."""
         return self._call(repo, "GET", f"/pulls/{number}").json()
 
+    def open_pulls(self, repo: str) -> list[dict[str, Any]]:
+        """The repo's open PRs (`number`, `user`, `head`, ...)."""
+        return list(self._each(repo, "/pulls", state="open"))
+
     def pull_files(self, repo: str, number: int) -> list[dict[str, Any]]:
         """The files PR `number` changes, each with its `patch` (absent for a
         binary or very large file)."""
