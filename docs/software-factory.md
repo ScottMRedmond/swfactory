@@ -73,7 +73,7 @@ The orchestrator then downloads the artifact, validates it, and does all the wri
 
 The dispatch is visible to anyone who can read the target repo's runs, so it carries no secrets. This closes the gap in today's setup, where the PAT is kept away from the agent's step but is, in the workflow's own words, "not a wall".
 
-**Base image.** The factory publishes a base image containing Node, the Claude Code CLI, Sandcastle, agent-browser and git. Every enrolled repo builds its image `FROM` it and adds its own toolchain (Python, SQLite, …). The base image is needed because the agent harness runs on Node even when the target repo doesn't. It's a public package on GHCR, like the factory repo, so any run can pull it without a token.
+**Base image.** The factory publishes a base image containing Node, the Claude Code CLI, Sandcastle, agent-browser and git. Every enrolled repo builds its image `FROM` it and adds its own toolchain (Python, SQLite, …). The base image is needed because the agent harness runs on Node even when the target repo doesn't. It's a public package on GHCR, like the factory repo, so any run can pull it without a token. It's `ghcr.io/<owner>/factory-base` (`:latest`, or `:<commit sha>` to pin), built from `base-image/Dockerfile` and published by the factory repo's `base-image.yml` workflow. It runs as the `agent` user, so an enrolment's Dockerfile switches to `USER root` to install its toolchain and back to `USER agent` after.
 
 **Visibility and cost.** Actions logs (agent transcripts, diffs, test output) take the visibility of the repo the job runs in, which is the target repo. **v1 starts with a private repo**, so its transcripts stay private.
 

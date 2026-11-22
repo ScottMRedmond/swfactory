@@ -1,0 +1,5 @@
+{
+  "name": "factory",
+  "version": "1.0.0",
+  "description": "The shared skills the factory's tasks call, namespaced as factory:<skill> so they never clash with a target repo's own skills."
+}
