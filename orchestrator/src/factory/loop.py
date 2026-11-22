@@ -33,6 +33,20 @@ def find_secret(value: Any) -> str | None:
     return None
 
 
+class TryLater(Exception):
+    """A `check` or `prepare` hook couldn't do its work now (e.g. GitHub or git
+    is unreachable): the row is left as it is, to be tried on a later tick."""
+
+
+# Checks a succeeded result beyond its schema (e.g. its bundle), given the
+# row, the parsed result.json and the run's files. Raises `ContractError` to
+# make the result invalid, or `TryLater`.
+Check = Callable[[sqlite3.Row, dict[str, Any], RunFiles], None]
+# Freshens a queued row's dispatch just before it goes out (e.g. implement's
+# base_sha). Returns the dispatch to send, or None to send it as queued.
+Prepare = Callable[[sqlite3.Row], dict[str, Any] | None]
+
+
 def _about(row: sqlite3.Row) -> dict[str, Any]:
     return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
@@ -92,12 +106,14 @@ def tick(
     limit: int,
     now: datetime | None = None,
     held: Collection[str] = (),
+    check: Check | None = None,
+    prepare: Prepare | None = None,
 ) -> None:
     """Cancel what was asked, collect, then dispatch. Queued rows of the repos
     in `held` stay queued."""
     cancel_requested(conn, runner)
-    collect(conn, runner, now=now)
-    dispatch(conn, runner, limit=limit, held=held)
+    collect(conn, runner, now=now, check=check)
+    dispatch(conn, runner, limit=limit, held=held, prepare=prepare)
 
 
 def request_cancel(conn: sqlite3.Connection, run_id: int) -> bool:
@@ -134,10 +150,12 @@ def collect(
     *,
     now: datetime | None = None,
     only: int | None = None,
+    check: Check | None = None,
 ) -> None:
     """Collect finished runs, and cancel ones still running well past their timeout.
 
     `only` limits it to one run (`factory doctor` waiting on its smoke run).
+    `check` judges a succeeded result further (see `Check`).
     """
     now = now or datetime.now(UTC)
     rows = conn.execute(
@@ -146,7 +164,10 @@ def collect(
     ).fetchall()
     for row in rows:
         try:
-            _collect_one(conn, runner, row, now)
+            _collect_one(conn, runner, row, now, check)
+        except TryLater as e:
+            log.warning("run %s can't be judged yet, trying again next tick: %s", row["id"], e,
+                        extra=_about(row))
         except RunRefused as e:
             # The run will never happen; not the ticket's fault, so not an attempt.
             log.warning("run %s goes back to the queue: %s", row["id"], e, extra=_about(row))
@@ -164,7 +185,8 @@ def collect(
 
 
 def _collect_one(
-    conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, now: datetime
+    conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, now: datetime,
+    check: Check | None = None,
 ) -> None:
     state = runner.state(row["repo"], row["runner_run_id"])
     if state is RunState.RUNNING:
@@ -182,7 +204,7 @@ def _collect_one(
         _finish(conn, row["id"], "timed_out", None)
         return
     files = runner.files(row["repo"], row["runner_run_id"])
-    outcome, result = _judge(row, files)
+    outcome, result = _judge(row, files, check)
     _finish(conn, row["id"], outcome, result)
 
 
@@ -209,7 +231,9 @@ def cancel(
         )
 
 
-def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
+def _judge(
+    row: sqlite3.Row, files: RunFiles | None, check: Check | None = None
+) -> tuple[str, str | None]:
     """The outcome of a finished run, and the result.json to keep (as JSON text)."""
     if files is None or files.result_json is None:
         log.warning("run %s finished without a result.json", row["id"], extra=_about(row))
@@ -230,6 +254,8 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
             raise ContractError(f"output holds something that looks like a {secret}")
         _check_duplicate_of(row, data.get("output") or {})
         _check_blockers_first(row, data.get("output") or {})
+        if check is not None and result.outcome == "succeeded":
+            check(row, data, files)
     except ContractError as e:
         log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
         return "invalid", kept
@@ -273,6 +299,7 @@ def dispatch(
     *,
     limit: int,
     held: Collection[str] = (),
+    prepare: Prepare | None = None,
     max_new: int | None = None,
 ) -> None:
     """Dispatch queued rows, oldest first, while fewer than `limit` are in
@@ -290,9 +317,13 @@ def dispatch(
         if row is None:
             return
         try:
-            dispatch_run(conn, runner, row)
+            dispatch_run(conn, runner, row, prepare)
             if max_new is not None:
                 max_new -= 1
+        except TryLater as e:
+            log.warning("run %s can't be prepared, stays queued: %s", row["id"], e,
+                        extra=_about(row))
+            return
         except RunnerUnavailable as e:
             # The row stays queued; try again next tick.
             log.warning("runner unavailable, run %s stays queued: %s", row["id"], e,
@@ -300,10 +331,19 @@ def dispatch(
             return
 
 
-def dispatch_run(conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row) -> None:
+def dispatch_run(
+    conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, prepare: Prepare | None = None
+) -> None:
     """Dispatch one queued row, whatever the limits. Raises `RunnerUnavailable`
-    (the row stays queued then)."""
-    runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+    or `TryLater` (the row stays queued then)."""
+    sent = json.loads(row["dispatch"])
+    if prepare is not None and (fresh := prepare(row)) is not None:
+        sent = fresh
+        # Stored first: the row keeps what the run was actually sent.
+        with conn:
+            conn.execute("UPDATE runs SET dispatch = ? WHERE id = ? AND status = 'queued'",
+                         (json.dumps(sent), row["id"]))
+    runner_run_id = runner.dispatch(row["repo"], sent)
     log_url = runner.log_link(row["repo"], runner_run_id)
     with conn:
         conn.execute(
