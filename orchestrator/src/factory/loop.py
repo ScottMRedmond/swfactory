@@ -124,10 +124,22 @@ def cancel_requested(conn: sqlite3.Connection, runner: Runner) -> None:
                         extra=_about(row))
 
 
-def collect(conn: sqlite3.Connection, runner: Runner, *, now: datetime | None = None) -> None:
-    """Collect finished runs, and cancel ones still running well past their timeout."""
+def collect(
+    conn: sqlite3.Connection,
+    runner: Runner,
+    *,
+    now: datetime | None = None,
+    only: int | None = None,
+) -> None:
+    """Collect finished runs, and cancel ones still running well past their timeout.
+
+    `only` limits it to one run (`factory doctor` waiting on its smoke run).
+    """
     now = now or datetime.now(UTC)
-    rows = conn.execute("SELECT * FROM runs WHERE status = 'dispatched' ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE status = 'dispatched' AND (? IS NULL OR id = ?) ORDER BY id",
+        (only, only),
+    ).fetchall()
     for row in rows:
         try:
             _collect_one(conn, runner, row, now)
@@ -243,17 +255,23 @@ def dispatch(
         if row is None:
             return
         try:
-            runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+            dispatch_run(conn, runner, row)
         except RunnerUnavailable as e:
             # The row stays queued; try again next tick.
             log.warning("runner unavailable, run %s stays queued: %s", row["id"], e,
                         extra=_about(row))
             return
-        log_url = runner.log_link(row["repo"], runner_run_id)
-        with conn:
-            conn.execute(
-                """UPDATE runs SET status = 'dispatched', runner_run_id = ?, log_url = ?,
-                                   dispatched_at = ?
-                   WHERE id = ?""",
-                (runner_run_id, log_url, _now(), row["id"]),
-            )
+
+
+def dispatch_run(conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row) -> None:
+    """Dispatch one queued row, whatever the limits. Raises `RunnerUnavailable`
+    (the row stays queued then)."""
+    runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+    log_url = runner.log_link(row["repo"], runner_run_id)
+    with conn:
+        conn.execute(
+            """UPDATE runs SET status = 'dispatched', runner_run_id = ?, log_url = ?,
+                               dispatched_at = ?
+               WHERE id = ?""",
+            (runner_run_id, log_url, _now(), row["id"]),
+        )

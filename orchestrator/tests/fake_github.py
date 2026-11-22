@@ -16,6 +16,7 @@ scoped to that repo. Every request is recorded in `.requests`.
 """
 
 import base64
+import fnmatch
 import hashlib
 import itertools
 import json
@@ -121,6 +122,8 @@ class Repo:
     labels: dict[str, dict[str, str]] = field(default_factory=dict)
     installed: bool = True
     permissions: dict[str, str] = field(default_factory=dict)
+    # Active ruleset rules by fnmatch branch pattern, e.g. {"factory/*": [{"type": "creation"}]}.
+    rules: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
 
@@ -204,6 +207,7 @@ class FakeGitHub:
             ("GET", repo + r"/issues/(\d+)/comments", self._list_comments, "token"),
             ("GET", repo + r"/issues/(\d+)/events", self._list_events, "token"),
             ("GET", repo + r"/collaborators/([^/]+)/permission", self._permission, "token"),
+            ("GET", repo + r"/rules/branches/(.+)", self._branch_rules, "token"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -333,6 +337,16 @@ class FakeGitHub:
         if permission is None:
             return _json(404, {"message": f"{login} is not a user"})
         return _json(200, {"permission": permission, "user": {"login": login}})
+
+    def _branch_rules(self, owner, name, branch, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        rules = [
+            {"ruleset_source_type": "Repository", "ruleset_source": repo.full_name,
+             "ruleset_id": 42, **rule}
+            for pattern, listed in repo.rules.items() if fnmatch.fnmatchcase(branch, pattern)
+            for rule in listed
+        ]
+        return _page(f"/repos/{owner}/{name}/rules/branches/{branch}", query, rules)
 
     def _get_issue(self, owner, name, number, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues.get(int(number))
