@@ -7,7 +7,9 @@ from factory import db
 RUNS_COLUMNS = [
     "id", "repo", "task", "ticket", "workflow_id", "attempt", "retry_of",
     "triggered_by", "status", "outcome", "runner_run_id", "dispatch", "result",
-    "created_at", "dispatched_at", "finished_at", "log_url",
+    "created_at", "dispatched_at", "finished_at",
+    "handled_at",  # not in the design doc: when the orchestrator acted on the result
+    "log_url",  # not in the design doc: the runner's log link, for the CLI
 ]
 
 

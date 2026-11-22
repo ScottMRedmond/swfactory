@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, db, logs, state, stats
+from factory import brakes, db, logs, serve, state, stats
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
 DEFAULT_LOGS = Path.home() / ".factory" / "logs"
@@ -71,11 +71,15 @@ def _parser() -> argparse.ArgumentParser:
     log.add_argument("--repo")
     log.add_argument("--level", choices=["debug", "info", "warn", "error"])
     log.add_argument("--follow", "-f", action="store_true")
+
+    serve.add_parser(commands)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "serve":
+        return serve.run(args)
     if args.command == "logs":
         return _logs(args)
 

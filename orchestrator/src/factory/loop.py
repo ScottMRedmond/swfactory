@@ -11,11 +11,25 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
+from factory import tokenscan
 from factory.contract import ContractError, Task, parse_result
 from factory.logs import about_run
 from factory.runner import Runner, RunFiles, RunState
 
 log = logging.getLogger(__name__)
+
+
+def find_secret(value: Any) -> str | None:
+    """The kind of the first token-like string anywhere in `value`, or None."""
+    if isinstance(value, str):
+        # Agent prose holding one makes the result invalid, so nothing is
+        # posted (software-factory.md, "Secrets in prose").
+        return next(iter(tokenscan.find(value)), None)
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return next((s for s in map(find_secret, value) if s is not None), None)
+    return None
 
 
 def _about(row: sqlite3.Row) -> dict[str, Any]:
@@ -95,6 +109,8 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
         result = parse_result(data, task=row["task"])
         if result.run_id != row["id"]:
             raise ContractError(f"result.json is for run {result.run_id}")
+        if (secret := find_secret(data.get("output"))) is not None:
+            raise ContractError(f"output holds something that looks like a {secret}")
     except ContractError as e:
         log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
         return "invalid", kept

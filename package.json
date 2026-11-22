@@ -4,18 +4,21 @@
   "description": "The software factory: orchestrator, runner and task scripts",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit -p .sandcastle/agent-workflows",
+    "typecheck": "tsc --noEmit -p .sandcastle/agent-workflows && tsc --noEmit -p runner",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test",
     "build:image": "docker build -f base-image/Dockerfile -t factory-base:test .",
-    "test:image": "vitest run --config base-image/vitest.config.ts"
+    "test:image": "vitest run --config base-image/vitest.config.ts",
+    "test:runner": "vitest run --config runner/vitest.config.ts"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "^0.14.0",
     "@types/node": "^22",
+    "ajv": "^8.20.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3",
     "vitest": "^5.0.5",
+    "yaml": "^2.9.1",
     "zod": "^3.25.36"
   },
   "allowScripts": {

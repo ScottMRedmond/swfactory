@@ -8,11 +8,10 @@ prefix (`sk-ant-`), GitHub tokens, JWTs (the App's) and PEM private keys.
 import re
 
 PATTERNS: dict[str, re.Pattern[str]] = {
-    "claude_token": re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
-    "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
-    "github_pat": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
-    "private_key": re.compile(
+    "Claude token": re.compile(r"sk-ant-[A-Za-z0-9_-]*"),
+    "GitHub token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
+    "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}"),
+    "private key": re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL
     ),
 }

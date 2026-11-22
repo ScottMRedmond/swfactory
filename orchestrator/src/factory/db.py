@@ -33,7 +33,12 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX runs_status ON runs (status, id);
     """,
-    # 2: what the operator CLI shows besides runs (#35). See factory.state.
+    # 2: when the orchestrator finished acting on a done run's result (e.g. posted
+    # explore's findings). NULL on a done row means there's still work to do.
+    """
+    ALTER TABLE runs ADD COLUMN handled_at TEXT;
+    """,
+    # 3: what the operator CLI shows besides runs (#35). See factory.state.
     """
     ALTER TABLE runs ADD COLUMN log_url TEXT;
     CREATE TABLE settings (
