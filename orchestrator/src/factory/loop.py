@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory.contract import ContractError, Task, parse_result
-from factory.runner import Runner, RunFiles, RunState
+from factory.runner import Runner, RunFiles, RunnerUnavailable, RunRefused, RunState
 
 log = logging.getLogger(__name__)
 
@@ -81,20 +81,37 @@ def tick(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
 def collect(conn: sqlite3.Connection, runner: Runner) -> None:
     rows = conn.execute("SELECT * FROM runs WHERE status = 'dispatched' ORDER BY id").fetchall()
     for row in rows:
-        state = runner.state(row["repo"], row["runner_run_id"])
-        if state is RunState.RUNNING:
-            continue
-        if state is RunState.MISSING:
-            log.warning("run %s is missing on the runner", row["id"])
-            _finish(conn, row["id"], "failed", None)
-            continue
-        if state is RunState.TIMED_OUT:
-            log.warning("run %s hit its timeout on the runner", row["id"])
-            _finish(conn, row["id"], "timed_out", None)
-            continue
-        files = runner.files(row["repo"], row["runner_run_id"])
-        outcome, result = _judge(row, files)
-        _finish(conn, row["id"], outcome, result)
+        try:
+            _collect_one(conn, runner, row)
+        except RunRefused as e:
+            # The run will never happen; not the ticket's fault, so not an attempt.
+            log.warning("run %s goes back to the queue: %s", row["id"], e)
+            with conn:
+                conn.execute(
+                    """UPDATE runs SET status = 'queued', runner_run_id = NULL, dispatched_at = NULL
+                       WHERE id = ? AND status = 'dispatched'""",
+                    (row["id"],),
+                )
+        except RunnerUnavailable as e:
+            # The row stays dispatched until the runner answers.
+            log.warning("runner unavailable while collecting run %s: %s", row["id"], e)
+
+
+def _collect_one(conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row) -> None:
+    state = runner.state(row["repo"], row["runner_run_id"])
+    if state is RunState.RUNNING:
+        return
+    if state is RunState.MISSING:
+        log.warning("run %s is missing on the runner", row["id"])
+        _finish(conn, row["id"], "failed", None)
+        return
+    if state is RunState.TIMED_OUT:
+        log.warning("run %s hit its timeout on the runner", row["id"])
+        _finish(conn, row["id"], "timed_out", None)
+        return
+    files = runner.files(row["repo"], row["runner_run_id"])
+    outcome, result = _judge(row, files)
+    _finish(conn, row["id"], outcome, result)
 
 
 def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
@@ -141,7 +158,12 @@ def dispatch(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
         ).fetchone()
         if row is None:
             return
-        runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+        try:
+            runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+        except RunnerUnavailable as e:
+            # The row stays queued; try again next tick.
+            log.warning("runner unavailable, run %s stays queued: %s", row["id"], e)
+            return
         with conn:
             conn.execute(
                 """UPDATE runs SET status = 'dispatched', runner_run_id = ?, dispatched_at = ?

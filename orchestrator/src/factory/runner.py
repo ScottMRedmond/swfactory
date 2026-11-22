@@ -72,17 +72,26 @@ class FakeRunner:
         self._runs: dict[str, dict[str, Any]] = {}
         self.dispatched: list[tuple[str, dict[str, Any]]] = []
         self.cancelled: list[str] = []
+        self.unavailable = False  # test control: every call raises RunnerUnavailable
+
+    def _answer(self) -> None:
+        if self.unavailable:
+            raise RunnerUnavailable("the fake runner is unavailable")
 
     def dispatch(self, repo: str, dispatch: dict[str, Any]) -> str:
+        self._answer()
         runner_run_id = str(next(self._ids))
         self._runs[runner_run_id] = {"repo": repo, "state": RunState.RUNNING, "files": None}
         self.dispatched.append((runner_run_id, dispatch))
         return runner_run_id
 
     def state(self, repo: str, runner_run_id: str) -> RunState:
+        self._answer()
         run = self._runs.get(runner_run_id)
         if run is None or run["repo"] != repo:
             return RunState.MISSING
+        if run.get("refused"):
+            raise RunRefused(f"the fake runner refused run {runner_run_id}")
         return run["state"]
 
     def files(self, repo: str, runner_run_id: str) -> RunFiles | None:
@@ -106,6 +115,10 @@ class FakeRunner:
     def time_out(self, runner_run_id: str) -> None:
         """The runner ended the run at the dispatch's timeout."""
         self._runs[runner_run_id].update(state=RunState.TIMED_OUT, files=None)
+
+    def refuse(self, runner_run_id: str) -> None:
+        """The runner won't start the run it accepted (on Actions: the spending limit)."""
+        self._runs[runner_run_id].update(refused=True)
 
     def forget(self, runner_run_id: str) -> None:
         """The runner no longer knows the run, e.g. its files expired."""

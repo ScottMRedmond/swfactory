@@ -167,6 +167,47 @@ def test_a_missing_run_is_failed(conn, runner):
     assert (r["status"], r["outcome"], r["result"]) == ("done", "failed", None)
 
 
+def test_an_unavailable_runner_leaves_queued_rows_queued(conn, runner):
+    run_id = enqueue_smoke(conn)
+    runner.unavailable = True
+
+    loop.tick(conn, runner, limit=2)
+
+    r = row(conn, run_id)
+    assert (r["status"], r["runner_run_id"]) == ("queued", None)
+    runner.unavailable = False
+    loop.tick(conn, runner, limit=2)
+    assert row(conn, run_id)["status"] == "dispatched"
+
+
+def test_an_unavailable_runner_leaves_dispatched_rows_as_they_are(conn, runner):
+    run_id = enqueue_smoke(conn)
+    loop.tick(conn, runner, limit=2)
+    finish(runner, conn, run_id, smoke_result(run_id))
+    runner.unavailable = True
+
+    loop.tick(conn, runner, limit=2)
+
+    assert row(conn, run_id)["status"] == "dispatched"
+    runner.unavailable = False
+    loop.tick(conn, runner, limit=2)
+    assert row(conn, run_id)["outcome"] == "succeeded"
+
+
+def test_a_run_the_runner_refused_goes_back_to_the_queue(conn, runner):
+    run_id = enqueue_smoke(conn)
+    loop.tick(conn, runner, limit=1)
+    first = row(conn, run_id)["runner_run_id"]
+    runner.refuse(first)
+
+    loop.tick(conn, runner, limit=1)
+
+    r = row(conn, run_id)
+    assert (r["status"], r["attempt"], r["outcome"]) == ("dispatched", 1, None)
+    assert r["runner_run_id"] != first
+    assert len(runner.dispatched) == 2
+
+
 def test_a_run_the_runner_timed_out_is_timed_out(conn, runner):
     run_id = enqueue_smoke(conn)
     loop.tick(conn, runner, limit=2)

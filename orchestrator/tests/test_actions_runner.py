@@ -11,7 +11,8 @@ import zipfile
 import pytest
 
 from factory.actions_runner import ActionsRunner
-from factory.github_http import HttpResponse
+from factory.github import GitHubError, Request
+from factory.github import Response as HttpResponse
 from factory.runner import RunFiles, RunnerUnavailable, RunRefused, RunState
 
 REPO = "octo/widgets"
@@ -41,8 +42,9 @@ class FakeGitHub:
         self.routes[(method, url)] = response
         return self
 
-    def request(self, method, url, *, headers, body=None):
-        self.requests.append({"method": method, "url": url, "headers": headers, "body": body})
+    def __call__(self, req):
+        method, url = req.method, req.url
+        self.requests.append({"method": method, "url": url, "headers": req.headers, "body": req.body})
         response = self.routes.get((method, url))
         if response is None:
             return ok({"message": "Not Found"}, status=404)
@@ -345,6 +347,15 @@ def test_tokens_are_asked_for_the_runs_repo(github):
     github.on("POST", f"/repos/{REPO}/actions/runs/555/cancel", ok({}, status=202))
     runner.cancel(REPO, "555")
     assert tokens.asked == [REPO]
+
+
+def test_failing_to_get_a_token_is_runner_unavailable(github):
+    class NoTokens:
+        def token(self, repo):
+            raise GitHubError(Request("POST", "https://api.github.com/app", {}), HttpResponse(502, {}, b""))
+
+    with pytest.raises(RunnerUnavailable):
+        ActionsRunner(github, NoTokens()).state(REPO, "555")
 
 
 def test_nothing_outside_the_adapter_knows_its_actions():

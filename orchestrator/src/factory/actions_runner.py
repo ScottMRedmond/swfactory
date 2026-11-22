@@ -10,18 +10,14 @@ import io
 import json
 import logging
 import zipfile
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol
 
-from factory.github_http import HttpClient, HttpResponse, TokenSource
+from factory.github import API, API_VERSION, USER_AGENT, GitHubError, Request, Response, Transport
 from factory.runner import RunFiles, RunnerUnavailable, RunRefused, RunState
 
 log = logging.getLogger(__name__)
 
-API = "https://api.github.com"
 WEB = "https://github.com"
-# The older default, 2022-11-28, is sunset on 10 March 2028.
-API_VERSION = "2026-03-10"
 CALLER_WORKFLOW = "factory.yml"
 ARTIFACT = "factory-run"
 
@@ -33,9 +29,16 @@ BILLING_MESSAGE = (
 )
 
 
+class TokenSource(Protocol):
+    def token(self, repo: str) -> str:
+        """A token that may act on `repo` (in the factory, `github.AppAuth`)."""
+
+
 class ActionsRunner:
-    def __init__(self, http: HttpClient, tokens: TokenSource) -> None:
-        self._http = http
+    """Talks to Actions through a `github.Transport`, with a token per repo."""
+
+    def __init__(self, transport: Transport, tokens: TokenSource) -> None:
+        self._transport = transport
         self._tokens = tokens
         self._default_branches: dict[str, str] = {}
         self._logged_stepless_jobs: set[tuple[str, int]] = set()
@@ -151,49 +154,53 @@ class ActionsRunner:
 
     def _download(self, repo: str, url: str) -> bytes | None:
         """An artifact's zip, or None if it's gone. The redirect target gets no token."""
-        resp = self._send("GET", url, self._headers(repo))
+        resp = self._send("GET", url, repo)
         if resp.status in (404, 410):
             return None
-        if resp.status in (301, 302, 303, 307, 308) and resp.header("Location"):
-            resp = self._send("GET", resp.header("Location"), {})
+        location = _header(resp, "Location")
+        if resp.status in (301, 302, 303, 307, 308) and location:
+            # A transport that doesn't follow redirects; the blob URL is pre-signed.
+            resp = self._send("GET", location, None)
             if resp.status in (404, 410):
                 return None
         if resp.status != 200:
             raise _unavailable("couldn't download the artifact", resp)
         return resp.body
 
-    def _headers(self, repo: str) -> dict[str, str]:
-        return {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self._tokens.token(repo)}",
-            "X-GitHub-Api-Version": API_VERSION,
-            "User-Agent": "swfactory-orchestrator",
-        }
+    def _api(self, repo: str, method: str, path: str, body: Any = None) -> Response:
+        return self._send(method, API + path, repo, body)
 
-    def _api(self, repo: str, method: str, path: str, body: Any = None) -> HttpResponse:
-        headers = self._headers(repo)
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json"
-            data = json.dumps(body).encode()
-        return self._send(method, API + path, headers, data)
-
-    def _send(
-        self, method: str, url: str, headers: Mapping[str, str], body: bytes | None = None
-    ) -> HttpResponse:
+    def _send(self, method: str, url: str, repo: str | None, body: Any = None) -> Response:
+        """One request: to the API with `repo`'s token, or with no token at all."""
         try:
-            return self._http.request(method, url, headers=headers, body=body)
-        except (OSError, http.client.HTTPException) as e:
+            headers = {"User-Agent": USER_AGENT}
+            if repo is not None:
+                headers |= {
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": API_VERSION,
+                    "Authorization": f"Bearer {self._tokens.token(repo)}",
+                }
+            data = None
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+                data = json.dumps(body).encode()
+            return self._transport(Request(method, url, headers, data))
+        except (OSError, http.client.HTTPException, GitHubError) as e:
+            # GitHubError: minting the installation token failed (its message holds no token).
             raise RunnerUnavailable(f"{method} {url.split('?')[0]}: {e}") from e
 
 
-def _unavailable(what: str, resp: HttpResponse) -> RunnerUnavailable:
+def _header(resp: Response, name: str) -> str | None:
+    return next((v for k, v in resp.headers.items() if k.lower() == name.lower()), None)
+
+
+def _unavailable(what: str, resp: Response) -> RunnerUnavailable:
     data = _json(resp, default={}) if resp.body else {}
     message = data.get("message", "") if isinstance(data, dict) else ""
     return RunnerUnavailable(f"{what}: HTTP {resp.status} {message}".rstrip())
 
 
-def _json(resp: HttpResponse, default: Any = None) -> Any:
+def _json(resp: Response, default: Any = None) -> Any:
     try:
         return json.loads(resp.body)
     except (UnicodeDecodeError, json.JSONDecodeError):
