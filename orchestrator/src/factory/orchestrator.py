@@ -16,9 +16,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from factory import loop
+from factory import loop, state
 from factory.contract import CONTRACT_VERSION
 from factory.github import GitHub, GitHubError
+from factory.logs import about_run
 from factory.runner import Runner
 
 log = logging.getLogger(__name__)
@@ -75,8 +76,13 @@ def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings
                     "timeout_minutes": settings.timeouts["explore"],
                 },
             )
-            log.info("queued explore run %s for %s#%s", run_id, repo, ticket)
+            log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
+                     extra=about_run(id=run_id, repo=repo, ticket=ticket))
         github.remove_label(repo, issue["number"], EXPLORE_LABEL)
+
+
+def _about(row: sqlite3.Row) -> dict[str, Any]:
+    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
 
 def run_once(conn: sqlite3.Connection, github: GitHub, runner: Runner, settings: Settings) -> None:
@@ -87,8 +93,9 @@ def run_once(conn: sqlite3.Connection, github: GitHub, runner: Runner, settings:
     for repo in settings.repos:
         try:
             poll(conn, github, repo, settings)
+            state.record_poll(conn, repo)
         except (GitHubError, OSError) as e:
-            log.error("polling %s failed: %s", repo, e)
+            log.error("polling %s failed: %s", repo, e, extra={"repo": repo})
     loop.tick(conn, runner, limit=settings.max_in_flight)
     handle_finished(conn, github, runner)
 
@@ -110,9 +117,10 @@ def handle_finished(conn: sqlite3.Connection, github: GitHub, runner: Runner) ->
                 body = render_explore_comment(row["id"], result["output"], link)
                 github.post_comment(row["repo"], int(row["ticket"]), body)
                 log.info("posted explore findings of run %s on %s#%s",
-                         row["id"], row["repo"], row["ticket"])
+                         row["id"], row["repo"], row["ticket"], extra=_about(row))
         except (GitHubError, OSError) as e:
-            log.error("run %s: writing the result to GitHub failed: %s", row["id"], e)
+            log.error("run %s: writing the result to GitHub failed: %s", row["id"], e,
+                      extra=_about(row))
             continue
         with conn:
             conn.execute(
