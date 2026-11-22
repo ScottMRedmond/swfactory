@@ -5,8 +5,8 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Every trigger label is checked (`factory.triggers`); explore and review are
-queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
+Every trigger label is checked (`factory.triggers`); explore, implement and
+review are queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
 """
 
 import json
@@ -84,10 +84,11 @@ def handle_triggers(
     `issues` is what a poll found: a full scan's open issues and PRs, or the
     issues and PRs (open or closed) updated since the cursor.
 
-    Explore and review are queued so far (a review of a PR the factory didn't
-    open is findings-only, and a fork PR gets only a notice); an accepted
-    `agent:implement` or `agent:implement-spec` is left on its issue for the
-    tickets that build those tasks. The row is inserted first, then the label removed, so a crash
+    Explore, implement and review are queued so far (implement not while the
+    ticket has an open factory PR; a review of a PR the factory didn't open is
+    findings-only, and a fork PR gets only a notice); an accepted
+    `agent:implement-spec` is left on its issue for the tickets that build
+    that workflow. The row is inserted first, then the label removed, so a crash
     between the two leaves a duplicate trigger rather than a lost one, which
     the next poll removes quietly. A ticket too big to dispatch gets a notice
     instead, and its label is removed too.
@@ -112,6 +113,10 @@ def handle_triggers(
         elif decision.task == "explore":
             implement_ticket.start_explore(conn, github, settings, issue, enrolment,
                                            decision.triggered_by)
+            github.remove_label(repo, issue["number"], decision.label)
+        elif decision.task == "implement":
+            implement_ticket.start_implement(conn, github, settings, issue, enrolment,
+                                             decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
         elif decision.task == "review":
             _start_review(conn, github, settings, issue, enrolment, decision)
@@ -295,6 +300,8 @@ class Poller:
                 )
             if issues is not None:
                 cancel_closed(conn, repo, issues, full_scan=state.cursor is None)
+                implement_ticket.cancel_closed_prs(conn, github, settings, repo, issues,
+                                                   full_scan=state.cursor is None)
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:
