@@ -85,7 +85,7 @@ const makePR = (agent: string, pr: Files = { "search.py": "def search(): pass\n"
 
 const reviewDispatch = (pr: { prBase: string; head: string }, extra: object = {}) => ({
   contract_version: 1,
-  run_id: 420,
+  run_id: 426,
   repo: "octo/widgets",
   task: "review",
   ticket: "130",
@@ -151,7 +151,7 @@ describe("a review run", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 420,
+      run_id: 426,
       task: "review",
       outcome: "succeeded",
       check_before: { passed: true, output_tail: "checked\n" },
@@ -208,7 +208,7 @@ describe("a findings-only review", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 420,
+      run_id: 426,
       task: "review",
       outcome: "succeeded",
       check_before: { passed: true, output_tail: "checked\n" },
@@ -251,7 +251,7 @@ describe("the check", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 420,
+      run_id: 426,
       task: "review",
       outcome: "failed",
       failure: "check_failed",
