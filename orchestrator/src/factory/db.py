@@ -98,6 +98,11 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX workflows_repo ON workflows (repo, status);
     """,
+    # 6: the numeric GitHub user id of `triggered_by` (implement and review
+    # dispatches carry `triggered_by: {login, id}` for the commit trailer).
+    """
+    ALTER TABLE runs ADD COLUMN triggered_by_id INTEGER;
+    """,
 ]
 
 
