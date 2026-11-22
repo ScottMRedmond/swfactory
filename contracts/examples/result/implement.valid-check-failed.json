@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 414,
+  "task": "implement",
+  "outcome": "failed",
+  "failure": "check_failed",
+  "check": {
+    "passed": false,
+    "output_tail": "FAILED tests/test_search.py::test_accents - AssertionError\n1 failed, 41 passed in 2.31s\n"
+  },
+  "output": {
+    "verdict": "built"
+  }
+}

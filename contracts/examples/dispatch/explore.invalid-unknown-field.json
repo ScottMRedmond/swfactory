@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "repo": "octo/widgets",
+  "task": "explore",
+  "ticket": "123",
+  "ticket_markdown": "# Search ignores accents\n",
+  "older_issues": [],
+  "base_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  "enrolment_sha": "9f2c1e0a7d3b4c5e6f708192a3b4c5d6e7f80912",
+  "model": "claude-sonnet-4-6",
+  "timeout_minutes": 20,
+  "github_token": "ghs_not_allowed_in_a_dispatch"
+}

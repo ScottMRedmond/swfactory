@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ScottMRedmond/swfactory/contracts/enrolment.schema.json",
+  "title": "Enrolment",
+  "description": "A target repo's .factory/config.yml, read from its default branch. It isn't part of the runner contract, so it has no contract_version.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["setup", "check"],
+  "properties": {
+    "setup": {
+      "description": "Run before explore, implement, review and smoke, e.g. `uv sync`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "check": {
+      "description": "The repo's check, e.g. `pytest`.",
+      "type": "string",
+      "minLength": 1
+    },
+    "test_paths": {
+      "description": "Globs for test files, e.g. tests/**. Review's fixes may touch them as well as the PR's own files.",
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "tasks": {
+      "description": "The tasks enabled for this repo. Left out, every task is enabled. smoke is always enabled.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/task"}
+    },
+    "enabled": {
+      "description": "false: still polled and triggers are queued, but nothing is dispatched. Defaults to true.",
+      "type": "boolean"
+    },
+    "timeouts": {
+      "description": "Per-task timeout overrides, in minutes. run.yml still caps them at 60.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "explore": {"$ref": "#/$defs/timeout"},
+        "implement": {"$ref": "#/$defs/timeout"},
+        "review": {"$ref": "#/$defs/timeout"},
+        "auto-tickets": {"$ref": "#/$defs/timeout"}
+      }
+    },
+    "models": {
+      "description": "Per-task model overrides.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "explore": {"$ref": "#/$defs/model"},
+        "implement": {"$ref": "#/$defs/model"},
+        "review": {"$ref": "#/$defs/model"},
+        "auto-tickets": {"$ref": "#/$defs/model"}
+      }
+    }
+  },
+  "$defs": {
+    "task": {"enum": ["explore", "implement", "review", "auto-tickets"]},
+    "timeout": {"type": "integer", "minimum": 1},
+    "model": {"type": "string", "minLength": 1, "maxLength": 100}
+  }
+}

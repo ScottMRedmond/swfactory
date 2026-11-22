@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 413,
+  "task": "explore",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "duplicate",
+    "summary": "Accented names sort in the wrong place.",
+    "findings": "Same root cause as #97: names are compared without collation in sort_names().",
+    "plan": [],
+    "files": ["app/names.py"],
+    "duplicate_of": "97"
+  }
+}

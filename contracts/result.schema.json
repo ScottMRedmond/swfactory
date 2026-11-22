@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ScottMRedmond/swfactory/contracts/result.schema.json",
+  "title": "Result",
+  "description": "The result.json a run uploads. The agent writes only output (as output.json); the run's own steps write everything else, including the check results, out of the agent's reach. output is a tagged union on task.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "run_id", "task", "outcome"],
+  "properties": {
+    "contract_version": {"$ref": "dispatch.schema.json#/$defs/contract_version"},
+    "run_id": {"$ref": "dispatch.schema.json#/$defs/run_id"},
+    "task": {"enum": ["explore", "implement", "review", "auto-tickets", "smoke"]},
+    "outcome": {"enum": ["succeeded", "failed"]},
+    "failure": {"$ref": "#/$defs/failure"},
+    "check": {"$ref": "#/$defs/check", "description": "Implement and smoke: the check after the task."},
+    "check_before": {"$ref": "#/$defs/check", "description": "Review: the check before the agent ran."},
+    "check_after": {"$ref": "#/$defs/check", "description": "Review: the check on review's fixes."},
+    "output": {"description": "The task's output; its sub-schema depends on task."}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "succeeded"}}},
+      "then": {"required": ["output"], "not": {"required": ["failure"]}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "failed"}}},
+      "then": {"required": ["failure"]}
+    },
+    {
+      "if": {"properties": {"task": {"const": "explore"}}},
+      "then": {
+        "properties": {"output": {"$ref": "#/$defs/explore_output"}},
+        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"task": {"const": "implement"}}},
+      "then": {
+        "properties": {"output": {"$ref": "#/$defs/implement_output"}},
+        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"task": {"const": "review"}}},
+      "then": {
+        "properties": {"output": {"$ref": "#/$defs/review_output"}},
+        "not": {"required": ["check"]}
+      }
+    },
+    {
+      "if": {"properties": {"task": {"const": "auto-tickets"}}},
+      "then": {
+        "properties": {"output": {"$ref": "#/$defs/auto_tickets_output"}},
+        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"task": {"const": "smoke"}}},
+      "then": {
+        "properties": {"output": {"$ref": "#/$defs/smoke_output"}},
+        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}]}
+      }
+    }
+  ],
+  "$defs": {
+    "failure": {
+      "description": "Why a failed run failed. contract_mismatch, claude_auth and usage_limit aren't attempts.",
+      "enum": [
+        "setup_failed",
+        "agent_error",
+        "agent_timeout",
+        "no_output",
+        "invalid_output",
+        "check_failed",
+        "contract_mismatch",
+        "claude_auth",
+        "usage_limit"
+      ]
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "output_tail"],
+      "properties": {
+        "passed": {"type": "boolean"},
+        "output_tail": {
+          "description": "The last 50 lines of the check command's output.",
+          "type": "string",
+          "maxLength": 20000
+        }
+      }
+    },
+    "prose": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "line": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "path": {"type": "string", "minLength": 1, "maxLength": 500},
+    "explore_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "summary", "findings", "plan", "files"],
+      "properties": {
+        "verdict": {"enum": ["easy-call", "needs-a-human", "waiting", "duplicate", "too-big"]},
+        "summary": {"$ref": "#/$defs/prose", "description": "What the ticket really asks for."},
+        "findings": {"$ref": "#/$defs/prose", "description": "What the code does today, and whether the claims held up."},
+        "plan": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/line"}},
+        "files": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/path"}},
+        "questions": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/line"}},
+        "duplicate_of": {
+          "description": "The older issue this duplicates; must be one of the dispatch's older_issues.",
+          "$ref": "dispatch.schema.json#/$defs/ticket"
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["verdict"], "properties": {"verdict": {"enum": ["needs-a-human", "waiting"]}}},
+          "then": {"required": ["questions"], "properties": {"questions": {"minItems": 1}}}
+        },
+        {
+          "if": {"required": ["verdict"], "properties": {"verdict": {"const": "duplicate"}}},
+          "then": {"required": ["duplicate_of"]},
+          "else": {"not": {"required": ["duplicate_of"]}}
+        }
+      ]
+    },
+    "implement_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict"],
+      "properties": {
+        "verdict": {"enum": ["built", "needs-a-human"]},
+        "comment": {"$ref": "#/$defs/prose", "description": "Why the ticket can't be built as written."},
+        "pr_body": {"$ref": "#/$defs/prose", "description": "What the ticket asked for, what was built, and what was left out."}
+      },
+      "if": {"required": ["verdict"], "properties": {"verdict": {"const": "needs-a-human"}}},
+      "then": {"required": ["comment"]}
+    },
+    "review_axis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "reasoning"],
+      "properties": {
+        "verdict": {"enum": ["pass", "changes-requested"]},
+        "reasoning": {"type": "string", "minLength": 1, "maxLength": 5000}
+      }
+    },
+    "review_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standards", "spec", "comments", "fixed"],
+      "properties": {
+        "standards": {"$ref": "#/$defs/review_axis", "description": "Describes the PR after review's own fixes."},
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdict", "reasoning"],
+          "properties": {
+            "verdict": {"enum": ["pass", "changes-requested", "no-ticket"]},
+            "reasoning": {"type": "string", "minLength": 1, "maxLength": 5000}
+          }
+        },
+        "comments": {
+          "description": "The findings review left unfixed, most important first.",
+          "type": "array",
+          "maxItems": 25,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["axis", "title", "path", "line", "body"],
+            "properties": {
+              "axis": {"enum": ["standards", "spec"]},
+              "title": {"type": "string", "minLength": 1, "maxLength": 200},
+              "path": {"$ref": "#/$defs/path"},
+              "line": {"type": "integer", "minimum": 1},
+              "body": {"type": "string", "minLength": 1, "maxLength": 5000}
+            }
+          }
+        },
+        "fixed": {
+          "description": "One short line per fix review made.",
+          "type": "array",
+          "maxItems": 50,
+          "items": {"$ref": "#/$defs/line"}
+        },
+        "missing_rules": {
+          "description": "Rules review wanted to fail the change for that no standard covers.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {"$ref": "#/$defs/line"}
+        }
+      }
+    },
+    "auto_tickets_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict"],
+      "properties": {
+        "verdict": {"enum": ["decomposed", "needs-a-human"]},
+        "comment": {"$ref": "#/$defs/prose", "description": "Why the spec can't be cut into 12 tickets, and how to split it."},
+        "tickets": {
+          "description": "Blockers first.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "what_to_build", "acceptance_criteria", "blocked_by"],
+            "properties": {
+              "title": {"type": "string", "minLength": 1, "maxLength": 256},
+              "what_to_build": {"$ref": "#/$defs/prose"},
+              "acceptance_criteria": {
+                "description": "Rendered as - [ ] checkboxes.",
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {"$ref": "#/$defs/line"}
+              },
+              "blocked_by": {
+                "description": "Earlier tickets in this list, by zero-based index.",
+                "type": "array",
+                "maxItems": 11,
+                "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 0, "maximum": 10}
+              },
+              "related": {
+                "description": "Existing issues this ticket overlaps (rendered as Related: #M).",
+                "type": "array",
+                "maxItems": 10,
+                "items": {"$ref": "dispatch.schema.json#/$defs/ticket"}
+              }
+            }
+          }
+        }
+      },
+      "if": {"required": ["verdict"], "properties": {"verdict": {"const": "decomposed"}}},
+      "then": {"required": ["tickets"]},
+      "else": {"required": ["comment"], "not": {"required": ["tickets"]}}
+    },
+    "smoke_output": {
+      "description": "Smoke runs no agent, so its output is empty.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  }
+}

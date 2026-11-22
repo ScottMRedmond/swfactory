@@ -1,0 +1,16 @@
+{
+  "contract_version": 1,
+  "run_id": 420,
+  "repo": "octo/widgets",
+  "task": "review",
+  "ticket": "130",
+  "ticket_markdown": "# PR #130: Fold accents when searching\n\n## Reviewed against: #123 Search ignores accents\n\n...\n",
+  "pr_number": 130,
+  "pr_base_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  "findings_only": false,
+  "base_sha": "1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6",
+  "branch": "factory/123-414",
+  "enrolment_sha": "9f2c1e0a7d3b4c5e6f708192a3b4c5d6e7f80912",
+  "model": "claude-opus-4-6",
+  "timeout_minutes": 45
+}

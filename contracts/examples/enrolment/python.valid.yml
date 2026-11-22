@@ -1,0 +1,10 @@
+setup: uv sync
+check: uv run pytest
+test_paths:
+  - tests/**
+tasks: [explore, implement, review, auto-tickets]
+enabled: true
+timeouts:
+  implement: 55
+models:
+  explore: claude-haiku-4-5

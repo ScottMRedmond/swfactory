@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "task": "explore",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "easy-call",
+    "summary": "Search should match words whatever their accents, so \"cafe\" finds \"café\".",
+    "findings": "search() compares raw strings with LIKE. The claim holds: test_search.py has no accented case and \"cafe\" misses \"café\" today.",
+    "plan": [
+      "Fold accents with unicodedata.normalize in search.normalise()",
+      "Store a folded column and search it",
+      "Add a test for accented and unaccented queries"
+    ],
+    "files": ["app/search.py", "tests/test_search.py"]
+  }
+}

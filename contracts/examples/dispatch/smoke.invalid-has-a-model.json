@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "run_id": 400,
+  "repo": "octo/widgets",
+  "task": "smoke",
+  "base_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  "enrolment_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  "model": "claude-sonnet-4-6",
+  "timeout_minutes": 20
+}

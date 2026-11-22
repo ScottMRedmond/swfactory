@@ -1,0 +1,7 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "task": "explore",
+  "outcome": "failed",
+  "failure": "agent_timeout"
+}

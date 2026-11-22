@@ -1,0 +1,3 @@
+setup: uv sync
+check: uv run pytest
+tasks: [explore, smoke]

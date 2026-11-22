@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "run_id": 432,
+  "task": "auto-tickets",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "needs-a-human",
+    "comment": "This spec needs about 20 tickets. Split it into storage and sharing, then into the UI, as two specs."
+  }
+}
