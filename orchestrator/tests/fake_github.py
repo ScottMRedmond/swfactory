@@ -76,8 +76,9 @@ class Issue:
     _ids = itertools.count(1_000_000)
 
     def add_comment(self, login: str, body: str, created_at: str = "2026-11-20T10:00:00Z") -> dict:
-        comment = {"id": next(self._ids), "body": body, "user": {"login": login},
-                   "created_at": created_at}
+        cid = next(self._ids)
+        comment = {"id": cid, "node_id": f"IC_{cid}", "body": body, "user": {"login": login},
+                   "created_at": created_at, "minimized": None}
         self.comments.append(comment)
         return comment
 
@@ -133,8 +134,9 @@ class Repo:
     permissions: dict[str, str] = field(default_factory=dict)
     # Active ruleset rules by fnmatch branch pattern, e.g. {"factory/*": [{"type": "creation"}]}.
     rules: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    # PRs by number: {"number", "title", "head", "base", "body", "draft", "state"}. Each is
-    # also in `issues` (with pull_request=True), sharing the issue numbers like on GitHub.
+    # PRs by number: {"number", "title", "head", "base", "body", "draft", "state",
+    # "closes" (issue numbers: its closing references), "requested_reviewers" (logins)}. Each
+    # is also in `issues` (with pull_request=True), sharing the issue numbers like on GitHub.
     pulls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
@@ -226,6 +228,9 @@ class FakeGitHub:
             ("GET", repo + r"/rules/branches/(.+)", self._branch_rules, "token"),
             ("POST", repo + "/pulls", self._open_pull, "token"),
             ("GET", repo + "/pulls", self._list_pulls, "token"),
+            ("GET", repo + r"/pulls/(\d+)", self._get_pull, "token"),
+            ("POST", repo + r"/pulls/(\d+)/requested_reviewers", self._request_reviewers, "token"),
+            ("POST", r"/graphql", self._graphql, "installation"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -469,7 +474,7 @@ class FakeGitHub:
                        author=APP_LOGIN)
         pr = {"number": number, "title": body["title"], "head": body["head"],
               "base": body["base"], "body": body.get("body"), "draft": body.get("draft", False),
-              "state": "open"}
+              "state": "open", "closes": [], "requested_reviewers": []}
         repo.pulls[number] = pr
         return _json(201, pr)
 
@@ -479,6 +484,79 @@ class FakeGitHub:
                  if p["state"] == query.get("state", "open")
                  and ("head" not in query or query["head"] == f"{owner}:{p['head']}")]
         return _json(200, found)
+
+    def add_pull(self, repo_name: str, number: int, title: str, head: str, *, base: str = "main",
+                 body: str = "", draft: bool = False, author: str = "someone",
+                 closes: list[int] | None = None, labels=()) -> dict[str, Any]:
+        """A PR opened by `author` (not through the API)."""
+        repo = self.repos[repo_name]
+        repo.add_issue(number, title, body, labels, pull_request=True, author=author)
+        pr = {"number": number, "title": title, "head": head, "base": base, "body": body,
+              "draft": draft, "state": "open", "closes": list(closes or []),
+              "requested_reviewers": []}
+        repo.pulls[number] = pr
+        return pr
+
+    @staticmethod
+    def _pull_node_id(repo_name: str, number: int) -> str:
+        return f"PR_{repo_name.replace('/', '_')}_{number}"
+
+    def _get_pull(self, owner, name, number, *, query, body):
+        pr = self.repos[f"{owner}/{name}"].pulls.get(int(number))
+        if pr is None:
+            return _json(404, {"message": "Not Found"})
+        return _json(200, {"number": pr["number"],
+                           "node_id": self._pull_node_id(f"{owner}/{name}", pr["number"]),
+                           "title": pr["title"], "draft": pr["draft"], "state": pr["state"],
+                           "head": {"ref": pr["head"]}, "base": {"ref": pr["base"]}})
+
+    def _request_reviewers(self, owner, name, number, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        pr = repo.pulls[int(number)]
+        for login in body["reviewers"]:
+            # Like GitHub: only collaborators, and never the PR's author.
+            if repo.permissions.get(login) is None or login == repo.issues[pr["number"]].author:
+                return _json(422, {"message": "Reviews may only be requested from collaborators."})
+        pr["requested_reviewers"] += [l for l in body["reviewers"]
+                                      if l not in pr["requested_reviewers"]]
+        return _json(201, {"number": pr["number"]})
+
+    def _graphql(self, token, *, query, body):
+        """The GraphQL operations the orchestrator sends, picked by operation name.
+        Like GitHub, errors come back in a 200 answer."""
+        text, variables = body["query"], body.get("variables") or {}
+        op = re.search(r"(?:query|mutation)\s+(\w+)", text).group(1)
+
+        def error(message):
+            return _json(200, {"data": None, "errors": [{"message": message}]})
+
+        repos = [self.repos[n] for n in token["repos"]]
+        if op == "ClosingIssues":
+            name = f"{variables['owner']}/{variables['name']}"
+            pr = self.repos[name].pulls.get(variables["number"]) if name in token["repos"] else None
+            if pr is None:
+                return error("Could not resolve to a PullRequest")
+            nodes = [{"number": n} for n in pr["closes"]]
+            return _json(200, {"data": {"repository": {"pullRequest": {
+                "closingIssuesReferences": {"nodes": nodes}}}}})
+        if op == "MarkReady":
+            for repo in repos:
+                for pr in repo.pulls.values():
+                    if self._pull_node_id(repo.full_name, pr["number"]) == variables["id"]:
+                        pr["draft"] = False
+                        return _json(200, {"data": {"markPullRequestReadyForReview": {
+                            "pullRequest": {"isDraft": False}}}})
+            return error("Could not resolve to a node")
+        if op == "MinimizeComment":
+            for repo in repos:
+                for issue in repo.issues.values():
+                    for comment in issue.comments:
+                        if comment["node_id"] == variables["id"]:
+                            comment["minimized"] = "OUTDATED"
+                            return _json(200, {"data": {"minimizeComment": {
+                                "minimizedComment": {"isMinimized": True}}}})
+            return error("Could not resolve to a node")
+        return error(f"unknown operation {op}")
 
 
 def _page(path: str, query: dict[str, str], items: list[Any]) -> Response:
