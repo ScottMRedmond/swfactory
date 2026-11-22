@@ -148,7 +148,7 @@ def test_a_label_added_between_polls_is_found_by_the_since_call(
     orchestrator.run_once(conn, github, runner, settings, poller=poller)
 
     assert queued(conn) == ["7"]
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
     # (Explore's list of older issues, sorted by creation, isn't a poll.)
     polls = [q for q in issue_lists(fake) if q.get("sort") != "created"]
     assert [q["state"] for q in polls] == ["open", "all", "all"]

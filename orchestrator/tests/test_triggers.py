@@ -181,7 +181,7 @@ def test_a_trigger_for_a_task_the_enrolment_doesnt_enable_is_removed_with_a_noti
 
     poll(conn, github, settings)
 
-    assert issue.labels == others
+    assert issue.labels == others + (["agent:in-progress"] if says is None else [])
     if says is None:
         assert len(runs(conn)) == 1 and notices(issue) == []
         return
@@ -204,7 +204,7 @@ def test_a_label_re_added_while_its_run_is_active_is_removed_with_a_notice(conn,
     poll(conn, github, settings)
 
     assert len(runs(conn)) == 1
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
     [notice] = notices(issue)
     assert notice == f"{NOTICE}\n@bob {BUSY}\n"
 
@@ -217,7 +217,7 @@ def test_a_label_left_over_from_a_crash_is_removed_quietly(conn, github, repo, s
     poll(conn, github, settings)
 
     assert len(runs(conn)) == 1
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
     assert notices(issue) == []
 
 
@@ -229,7 +229,7 @@ def test_any_other_trigger_on_a_busy_issue_is_removed_with_a_notice(conn, github
     poll(conn, github, settings)
 
     assert [r["task"] for r in runs(conn)] == ["explore"]
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
     assert notices(issue) == [f"{NOTICE}\n@alice {BUSY}\n"]
 
 

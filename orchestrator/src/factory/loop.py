@@ -8,7 +8,7 @@ rows while fewer than `limit` are in flight.
 import json
 import logging
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -58,9 +58,12 @@ def enqueue(
     retry_of: int | None = None,
     triggered_by: str | None = None,
     triggered_by_id: int | None = None,
+    branch: Callable[[int], str] | None = None,
 ) -> int:
     """Queue a run. `dispatch` is the dispatch minus `run_id`, which is the row's id.
-    `triggered_by` is a GitHub login and `triggered_by_id` its numeric user id."""
+    `triggered_by` is a GitHub login and `triggered_by_id` its numeric user id.
+    `branch`, given the row's id, names the dispatch's `branch` (branch names
+    include the run id)."""
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         run_id = conn.execute(
@@ -72,7 +75,8 @@ def enqueue(
         ).lastrowid
         conn.execute(
             "UPDATE runs SET dispatch = ? WHERE id = ?",
-            (json.dumps({**dispatch, "run_id": run_id}), run_id),
+            (json.dumps({**dispatch, "run_id": run_id,
+                         **({"branch": branch(run_id)} if branch else {})}), run_id),
         )
     return run_id
 
@@ -224,10 +228,21 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
             raise ContractError(f"result.json is for run {result.run_id}")
         if (secret := find_secret(data.get("output"))) is not None:
             raise ContractError(f"output holds something that looks like a {secret}")
+        _check_duplicate_of(row, data.get("output") or {})
     except ContractError as e:
         log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
         return "invalid", kept
     return result.outcome, kept
+
+
+def _check_duplicate_of(row: sqlite3.Row, output: dict[str, Any]) -> None:
+    """Explore's `duplicate_of` must be one of the older issues it was sent."""
+    duplicate_of = output.get("duplicate_of")
+    if row["task"] != "explore" or duplicate_of is None:
+        return
+    sent = {i["ticket"] for i in json.loads(row["dispatch"]).get("older_issues", [])}
+    if duplicate_of not in sent:
+        raise ContractError(f"duplicate_of {duplicate_of} isn't one of the older issues sent")
 
 
 def _finish(conn: sqlite3.Connection, run_id: int, outcome: str, result: str | None) -> None:

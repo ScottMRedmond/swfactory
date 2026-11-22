@@ -16,7 +16,7 @@ from typing import Any
 from factory.github import GitHub
 
 EXPLORE_MARK = "<!-- factory:explore "
-# The heading orchestrator.render_explore_comment writes for a duplicate.
+# The heading workflows.implement_ticket.render_explore_comment writes for a duplicate.
 DUPLICATE_OF = re.compile(r"^### Duplicate of\n\n#(\S+)$", re.MULTILINE)
 STATUS_MARK = "<!-- factory:status -->"
 NOTICE_MARK = "<!-- factory:notice -->"
@@ -209,3 +209,22 @@ def render(ticket: Ticket, trimmed: Sequence[str] = ()) -> str:
             parts.append(f"### @{c.author} on {c.created_at[:10]}\n")
             parts.append(f"{c.body.strip()}\n")
     return "\n".join(parts)
+
+
+def render_notice(message: str, mention: list[str] | None = None) -> str:
+    """A notice: a new comment, marked, @mentioning who has to act."""
+    who = "".join(f"@{login} " for login in mention or [])
+    return f"{NOTICE_MARK}\n{who}{message}\n"
+
+
+def render_too_big_notice(reason: str, mention: str | None = None) -> str:
+    """The notice for a ticket whose title and body alone don't fit in a dispatch.
+
+    `mention` is the login that triggered the run.
+    """
+    return render_notice(
+        f"This ticket's title and body are too long to dispatch ({reason}). "
+        "Please shorten it, for example by moving logs or long examples into a linked "
+        "file or gist, then add the label again.",
+        [mention] if mention else [],
+    )

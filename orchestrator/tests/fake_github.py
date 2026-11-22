@@ -70,6 +70,8 @@ class Issue:
     comments: list[dict[str, Any]] = field(default_factory=list)
     updated_at: float = 0.0
     events: list[dict[str, Any]] = field(default_factory=list)
+    author: str = "someone"
+    state_reason: str | None = None
     _ids = itertools.count(1_000_000)
 
     def add_comment(self, login: str, body: str, created_at: str = "2026-11-20T10:00:00Z") -> dict:
@@ -101,7 +103,8 @@ class Issue:
             "state": self.state,
             "labels": [{"name": n} for n in self.labels],
             "html_url": f"https://github.com/{repo}/issues/{self.number}",
-            "user": {"login": "someone"},
+            "user": {"login": self.author},
+            "state_reason": self.state_reason,
             "updated_at": _iso(self.updated_at),
         }
         if self.pull_request:
@@ -201,6 +204,8 @@ class FakeGitHub:
             ("GET", repo + r"/issues/(\d+)", self._get_issue, "token"),
             ("DELETE", repo + r"/issues/(\d+)/labels/(.+)", self._remove_label, "token"),
             ("POST", repo + r"/issues/(\d+)/comments", self._comment, "token"),
+            ("POST", repo + r"/issues/(\d+)/labels", self._add_labels, "token"),
+            ("PATCH", repo + r"/issues/(\d+)", self._update_issue, "token"),
             ("GET", repo + r"/contents/(.+)", self._contents, "token"),
             ("GET", repo + "/labels", self._list_labels, "token"),
             ("POST", repo + "/labels", self._create_label, "token"),
@@ -368,6 +373,33 @@ class FakeGitHub:
         issue.updated_at = self.clock()
         return _json(201, comment)
 
+    def _add_labels(self, owner, name, number, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        issue = repo.issues[int(number)]
+        for label in body["labels"]:
+            if label not in repo.labels:  # like GitHub: an unknown label is created
+                repo.labels[label] = {"name": label, "color": "ededed", "description": ""}
+            if label not in issue.labels:
+                issue.labels.append(label)
+                issue.add_event("labeled", APP_LOGIN, _iso(self.clock()), label={"name": label})
+        issue.updated_at = self.clock()
+        return _json(200, [{"name": n} for n in issue.labels])
+
+    # The close reasons GitHub accepts (`duplicate` was added in 2025).
+    STATE_REASONS = {"closed": ("completed", "not_planned", "duplicate"), "open": ("reopened",)}
+
+    def _update_issue(self, owner, name, number, *, query, body):
+        issue = self.repos[f"{owner}/{name}"].issues[int(number)]
+        state = body.get("state", issue.state)
+        reason = body.get("state_reason")
+        if reason is not None and reason not in self.STATE_REASONS[state]:
+            return _json(422, {"message": "Validation Failed"})
+        if state != issue.state:
+            issue.add_event("closed" if state == "closed" else "reopened", APP_LOGIN,
+                            _iso(self.clock()))
+        issue.state, issue.state_reason = state, reason
+        issue.updated_at = self.clock()
+        return _json(200, issue.json(f"{owner}/{name}"))
 
     def _contents(self, owner, name, path, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
