@@ -149,7 +149,9 @@ def test_a_label_added_between_polls_is_found_by_the_since_call(
 
     assert queued(conn) == ["7"]
     assert issue.labels == []
-    assert [q["state"] for q in issue_lists(fake)] == ["open", "all", "all"]
+    # (Explore's list of older issues, sorted by creation, isn't a poll.)
+    polls = [q for q in issue_lists(fake) if q.get("sort") != "created"]
+    assert [q["state"] for q in polls] == ["open", "all", "all"]
 
 
 def test_a_closed_issue_with_the_label_starts_nothing(
@@ -164,7 +166,7 @@ def test_a_closed_issue_with_the_label_starts_nothing(
 
 
 def full_scans(fake):
-    return [q for q in issue_lists(fake) if q["state"] == "open"]
+    return [q for q in issue_lists(fake) if q["state"] == "open" and q.get("sort") != "created"]
 
 
 def test_a_gap_of_more_than_5_minutes_brings_a_full_scan_with_fresh_tokens(

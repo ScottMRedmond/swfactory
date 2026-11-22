@@ -14,7 +14,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -164,6 +164,10 @@ class AppAuth:
         claims = {"iat": now - 60, "exp": now + 9 * 60, "iss": self._app_id}
         return jwt.encode(claims, self._key, algorithm="RS256")
 
+    def app(self) -> dict[str, Any]:
+        """The App itself (`id`, `slug`, ...), fetched with the App's JWT."""
+        return _send(self._transport, self._jwt(), "GET", f"{API}/app").json()
+
     def token(self, repo: str) -> str:
         cached = self._tokens.get(repo)
         if cached and cached[1] - TOKEN_MARGIN > self._clock():
@@ -211,6 +215,7 @@ class GitHub:
     def __init__(self, auth: AppAuth, transport: Transport):
         self._auth = auth
         self._transport = transport
+        self._app_login: str | None = None
 
     def __repr__(self) -> str:
         return f"GitHub({self._auth!r})"
@@ -247,19 +252,47 @@ class GitHub:
         branch = self._call(repo, "GET", "").json()["default_branch"]
         return self._call(repo, "GET", f"/branches/{quote(branch, safe='')}").json()["commit"]["sha"]
 
-    def open_issues_with_label(self, repo: str, label: str) -> list[dict[str, Any]]:
-        """Open issues and PRs carrying `label` (a PR has a `pull_request` key)."""
-        issues: list[dict[str, Any]] = []
+    def _each(self, repo: str, path: str, **query: Any) -> Iterator[dict[str, Any]]:
+        """Every item of the paged list at `path`, fetched a page at a time as they're consumed."""
         page = 1
         while True:
-            response = self._call(
-                repo, "GET", "/issues", state="open", labels=label, per_page=100, page=page
-            )
-            issues += response.json()
+            response = self._call(repo, "GET", path, per_page=100, page=page, **query)
+            yield from response.json()
             if 'rel="next"' not in response.headers.get("Link", ""):
-                return issues
+                return
             page += 1
 
+    def app_login(self) -> str:
+        """The login the App comments and acts as, e.g. `factory[bot]`."""
+        if self._app_login is None:
+            self._app_login = f"{self._auth.app()['slug']}[bot]"
+        return self._app_login
+
+    def open_issues_with_label(self, repo: str, label: str) -> list[dict[str, Any]]:
+        """Open issues and PRs carrying `label` (a PR has a `pull_request` key)."""
+        return list(self._each(repo, "/issues", state="open", labels=label))
+
+    def open_issues_newest_first(self, repo: str) -> Iterator[dict[str, Any]]:
+        """Open issues and PRs, newest first, fetched a page at a time as consumed."""
+        return self._each(repo, "/issues", state="open", sort="created", direction="desc")
+
+    def issue_comments(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """An issue's or PR's comments, oldest first."""
+        return list(self._each(repo, f"/issues/{number}/comments"))
+
+    def issue_events(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """An issue's events (`closed`, `reopened`, `labeled`, ...), oldest first."""
+        return list(self._each(repo, f"/issues/{number}/events"))
+
+    def permission(self, repo: str, login: str) -> str:
+        """`admin`, `write` (maintain shows as write), `read` or `none`."""
+        try:
+            path = f"/collaborators/{quote(login, safe='')}/permission"
+            return self._call(repo, "GET", path).json()["permission"]
+        except GitHubError as e:
+            if e.status == 404:
+                return "none"
+            raise
     def open_issues(self, repo: str) -> list[dict[str, Any]]:
         """Every open issue and PR (a PR has a `pull_request` key)."""
         query = {"state": "open", "per_page": 100}

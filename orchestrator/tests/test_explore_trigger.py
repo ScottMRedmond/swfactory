@@ -163,8 +163,13 @@ def test_pull_requests_and_unlabelled_issues_are_left_alone(conn, github, repo, 
     assert pr.labels == ["agent:explore"]
 
 
-def test_an_issue_with_no_body_renders_as_its_title():
-    assert orchestrator.render_ticket({"title": "Just a title", "body": None}) == "# Just a title\n"
+def test_an_issue_with_no_body_renders_as_its_title(conn, github, repo, settings):
+    repo.add_issue(7, "Just a title", None, labels=["agent:explore"])
+
+    orchestrator.poll(conn, github, REPO, settings)
+
+    [row] = runs(conn)
+    assert json.loads(row["dispatch"])["ticket_markdown"] == "# Just a title\n"
 
 
 # --- posting the findings -------------------------------------------------------

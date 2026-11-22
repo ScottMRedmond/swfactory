@@ -9,6 +9,9 @@ scoped to that repo. Every request is recorded in `.requests`.
     repo = gh.add_repo("octo/widgets")
     repo.add_issue(7, "Title", "Body", labels=["agent:explore"])
     repo.files[".factory/config.yml"] = "setup: uv sync\ncheck: pytest\n"
+    issue = repo.add_issue(7, "Title", "Body", labels=["agent:explore"])
+    repo.permissions["alice"] = "write"     # anyone else has "none"
+    issue.add_comment("alice", "A comment")  # the App comments as APP_LOGIN
     client = GitHub(AppAuth(APP_ID, PRIVATE_KEY, gh, clock=clock), gh)
 """
 
@@ -37,7 +40,14 @@ PRIVATE_KEY = _KEY.private_bytes(
 ).decode()
 PUBLIC_KEY = _KEY.public_key()
 
+APP_SLUG = "factory"
+APP_LOGIN = f"{APP_SLUG}[bot]"
+
 TOKEN_LIFETIME = 3600
+
+
+def _iso(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @dataclass
@@ -50,6 +60,21 @@ class Issue:
     pull_request: bool = False
     comments: list[dict[str, Any]] = field(default_factory=list)
     updated_at: float = 0.0
+    events: list[dict[str, Any]] = field(default_factory=list)
+    _ids = itertools.count(1_000_000)
+
+    def add_comment(self, login: str, body: str, created_at: str = "2026-11-20T10:00:00Z") -> dict:
+        comment = {"id": next(self._ids), "body": body, "user": {"login": login},
+                   "created_at": created_at}
+        self.comments.append(comment)
+        return comment
+
+    def add_event(self, event: str, login: str, created_at: str, **kw) -> dict:
+        """An issue event such as `closed` or `reopened`, by `login`."""
+        data = {"id": next(self._ids), "event": event, "actor": {"login": login},
+                "created_at": created_at, **kw}
+        self.events.append(data)
+        return data
 
     def json(self, repo: str) -> dict[str, Any]:
         data = {
@@ -79,6 +104,7 @@ class Repo:
     # Labels by name: {"name", "color", "description"}.
     labels: dict[str, dict[str, str]] = field(default_factory=dict)
     installed: bool = True
+    permissions: dict[str, str] = field(default_factory=dict)
 
     clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
 
@@ -147,6 +173,7 @@ class FakeGitHub:
         return [
             ("GET", r"/app/installations", self._installations, "jwt"),
             ("GET", r"/installation/repositories", self._installation_repos, "installation"),
+            ("GET", r"/app", self._app, "jwt"),
             ("GET", repo + "/installation", self._installation, "jwt"),
             ("POST", r"/app/installations/(\d+)/access_tokens", self._access_token, "jwt"),
             ("GET", repo, self._repo, "token"),
@@ -158,6 +185,9 @@ class FakeGitHub:
             ("GET", repo + r"/contents/(.+)", self._contents, "token"),
             ("GET", repo + "/labels", self._list_labels, "token"),
             ("POST", repo + "/labels", self._create_label, "token"),
+            ("GET", repo + r"/issues/(\d+)/comments", self._list_comments, "token"),
+            ("GET", repo + r"/issues/(\d+)/events", self._list_events, "token"),
+            ("GET", repo + r"/collaborators/([^/]+)/permission", self._permission, "token"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -206,14 +236,16 @@ class FakeGitHub:
                                                 if r.installation_id == i)}}
             for i in ids
         ]
-        return _paged(query, data, "https://api.github.com/app/installations")
+        return _page("/app/installations", query, data)
 
     def _installation_repos(self, token, *, query, body):
         repos = [self.repos[n] for n in sorted(token["repos"]) if self.repos[n].installed]
-        page = _paged(query, [{"full_name": r.full_name, "default_branch": r.default_branch}
-                              for r in repos], "https://api.github.com/installation/repositories")
+        page = _page("/installation/repositories", query,
+                     [{"full_name": r.full_name, "default_branch": r.default_branch} for r in repos])
         return _json(page.status, {"total_count": len(repos), "repositories": page.json()},
                      page.headers)
+    def _app(self, *, query, body):
+        return _json(200, {"id": int(APP_ID), "slug": APP_SLUG, "name": "Factory"})
 
     def _installation(self, owner, name, *, query, body):
         repo = self.repos.get(f"{owner}/{name}")
@@ -234,7 +266,7 @@ class FakeGitHub:
             201,
             {
                 "token": token,
-                "expires_at": datetime.fromtimestamp(expires, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "expires_at": _iso(expires),
                 "repository_selection": "selected",
             },
         )
@@ -265,21 +297,26 @@ class FakeGitHub:
             and all(l in i.labels for l in wanted)
             and (since is None or i.updated_at >= since)
         ]
-        per_page = int(query.get("per_page", 30))
-        page = int(query.get("page", 1))
-        chunk = issues[(page - 1) * per_page : page * per_page]
-        headers = {}
-        if page * per_page < len(issues):
-            nxt = f"https://api.github.com/repos/{owner}/{name}/issues?" + "&".join(
-                f"{k}={v}" for k, v in {**query, "page": page + 1}.items()
-            )
-            headers["Link"] = f'<{nxt}>; rel="next"'
-        response = _json(200, [i.json(repo.full_name) for i in chunk], headers)
+        response = _page(f"/repos/{owner}/{name}/issues", query, [i.json(repo.full_name) for i in issues])
         # Like GitHub: the ETag is a hash of the body, and a matching If-None-Match gets a 304.
         etag = f'W/"{hashlib.sha256(response.body).hexdigest()[:32]}"'
         if self._request_headers.get("If-None-Match") == etag:
             return Response(304, {"ETag": etag}, b"")
         return Response(response.status, {**response.headers, "ETag": etag}, response.body)
+
+    def _list_comments(self, owner, name, number, *, query, body):
+        issue = self.repos[f"{owner}/{name}"].issues[int(number)]
+        return _page(f"/repos/{owner}/{name}/issues/{number}/comments", query, issue.comments)
+
+    def _list_events(self, owner, name, number, *, query, body):
+        issue = self.repos[f"{owner}/{name}"].issues[int(number)]
+        return _page(f"/repos/{owner}/{name}/issues/{number}/events", query, issue.events)
+
+    def _permission(self, owner, name, login, *, query, body):
+        permission = self.repos[f"{owner}/{name}"].permissions.get(login)
+        if permission is None:
+            return _json(404, {"message": f"{login} is not a user"})
+        return _json(200, {"permission": permission, "user": {"login": login}})
 
     def _get_issue(self, owner, name, number, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues.get(int(number))
@@ -297,8 +334,7 @@ class FakeGitHub:
 
     def _comment(self, owner, name, number, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues[int(number)]
-        comment = {"id": next(self._ids), "body": body["body"], "user": {"login": "factory[bot]"}}
-        issue.comments.append(comment)
+        comment = issue.add_comment(APP_LOGIN, body["body"], created_at=_iso(self.clock()))
         issue.updated_at = self.clock()
         return _json(201, comment)
 
@@ -314,8 +350,7 @@ class FakeGitHub:
 
     def _list_labels(self, owner, name, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
-        return _paged(query, list(repo.labels.values()),
-                      f"https://api.github.com/repos/{owner}/{name}/labels")
+        return _page(f"/repos/{owner}/{name}/labels", query, list(repo.labels.values()))
 
     def _create_label(self, owner, name, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
@@ -327,12 +362,15 @@ class FakeGitHub:
         return _json(201, repo.labels[body["name"]])
 
 
-def _paged(query: dict[str, str], items: list[Any], base: str) -> Response:
+def _page(path: str, query: dict[str, str], items: list[Any]) -> Response:
+    """One page of `items`, with a `Link: rel="next"` header when there's more."""
     per_page = int(query.get("per_page", 30))
     page = int(query.get("page", 1))
     headers = {}
     if page * per_page < len(items):
-        nxt = base + "?" + "&".join(f"{k}={v}" for k, v in {**query, "page": page + 1}.items())
+        nxt = f"https://api.github.com{path}?" + "&".join(
+            f"{k}={v}" for k, v in {**query, "page": page + 1}.items()
+        )
         headers["Link"] = f'<{nxt}>; rel="next"'
     return _json(200, items[(page - 1) * per_page : page * per_page], headers)
 
@@ -355,10 +393,6 @@ def discover(conn, fake: "FakeGitHub") -> None:
     github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock), fake)
     enrolment.refresh(conn, github, factory_repo="octo/factory")
     fake.requests.clear()
-
-
-def _iso(t: float) -> str:
-    return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_iso(text: str) -> float:
