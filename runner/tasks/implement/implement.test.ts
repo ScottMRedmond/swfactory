@@ -9,13 +9,13 @@ const built = { verdict: "built", pr_body: "Built it." };
 
 const implementDispatch = (sha: string, extra: object = {}) => ({
   contract_version: 1,
-  run_id: 414,
+  run_id: 425,
   repo: "octo/widgets",
   task: "implement",
   ticket: "123",
   ticket_markdown: "# Search ignores accents\n\nSearching for cafe doesn't find café.\n",
   base_sha: sha,
-  branch: "factory/123-414",
+  branch: "factory/123-425",
   enrolment_sha: sha,
   model: "claude-test-model",
   timeout_minutes: 45,
@@ -127,9 +127,9 @@ describe("implement", () => {
     const run = runTask(implementDispatch(base), target.url, claudeEnv);
 
     expect(run.result, run.output).toMatchObject({ outcome: "succeeded", output: built });
-    expect(run.output).toContain(`on: factory/123-414 ${base}`);
+    expect(run.output).toContain(`on: factory/123-425 ${base}`);
     const bundle = join(run.out, "branch.bundle");
-    expect(git(run.out, "bundle", "list-heads", bundle)).toMatch(/ refs\/heads\/factory\/123-414$/);
+    expect(git(run.out, "bundle", "list-heads", bundle)).toMatch(/ refs\/heads\/factory\/123-425$/);
   });
 
   it("returns needs-a-human with its comment, and still runs the check", () => {
@@ -141,7 +141,7 @@ describe("implement", () => {
 
     expect(run.result, run.output).toEqual({
       contract_version: 1,
-      run_id: 414,
+      run_id: 425,
       task: "implement",
       outcome: "succeeded",
       check: { passed: true, output_tail: "checked\n" },
