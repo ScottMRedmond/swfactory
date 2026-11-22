@@ -12,9 +12,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory.contract import ContractError, Task, parse_result
+from factory.logs import about_run
 from factory.runner import Runner, RunFiles, RunState
 
 log = logging.getLogger(__name__)
+
+
+def _about(row: sqlite3.Row) -> dict[str, Any]:
+    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
 
 def _now() -> str:
@@ -65,7 +70,7 @@ def collect(conn: sqlite3.Connection, runner: Runner) -> None:
         if state is RunState.RUNNING:
             continue
         if state is RunState.MISSING:
-            log.warning("run %s is missing on the runner", row["id"])
+            log.warning("run %s is missing on the runner", row["id"], extra=_about(row))
             _finish(conn, row["id"], "failed", None)
             continue
         files = runner.files(row["repo"], row["runner_run_id"])
@@ -76,12 +81,12 @@ def collect(conn: sqlite3.Connection, runner: Runner) -> None:
 def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
     """The outcome of a finished run, and the result.json to keep (as JSON text)."""
     if files is None or files.result_json is None:
-        log.warning("run %s finished without a result.json", row["id"])
+        log.warning("run %s finished without a result.json", row["id"], extra=_about(row))
         return "failed", None
     try:
         data = json.loads(files.result_json)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        log.warning("run %s: result.json isn't JSON: %s", row["id"], e)
+        log.warning("run %s: result.json isn't JSON: %s", row["id"], e, extra=_about(row))
         return "invalid", None
     kept = json.dumps(data)
     try:
@@ -91,7 +96,7 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
         if result.run_id != row["id"]:
             raise ContractError(f"result.json is for run {result.run_id}")
     except ContractError as e:
-        log.warning("run %s: invalid result.json: %s", row["id"], e)
+        log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
         return "invalid", kept
     return result.outcome, kept
 
@@ -116,9 +121,11 @@ def dispatch(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
         if row is None:
             return
         runner_run_id = runner.dispatch(row["repo"], json.loads(row["dispatch"]))
+        log_url = runner.log_link(row["repo"], runner_run_id)
         with conn:
             conn.execute(
-                """UPDATE runs SET status = 'dispatched', runner_run_id = ?, dispatched_at = ?
+                """UPDATE runs SET status = 'dispatched', runner_run_id = ?, log_url = ?,
+                                   dispatched_at = ?
                    WHERE id = ?""",
-                (runner_run_id, _now(), row["id"]),
+                (runner_run_id, log_url, _now(), row["id"]),
             )

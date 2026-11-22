@@ -33,6 +33,35 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX runs_status ON runs (status, id);
     """,
+    # 2: what the operator CLI shows besides runs (#35). See factory.state.
+    """
+    ALTER TABLE runs ADD COLUMN log_url TEXT;
+    CREATE TABLE settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE usage_readings (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        read_at TEXT NOT NULL,
+        limits  TEXT,
+        error   TEXT
+    );
+    CREATE TABLE polls (
+        repo            TEXT PRIMARY KEY,
+        last_success_at TEXT NOT NULL
+    );
+    CREATE TABLE problems (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,
+        repo       TEXT,
+        summary    TEXT NOT NULL,
+        issue      TEXT,
+        opened_at  TEXT NOT NULL,
+        closed_at  TEXT
+    );
+    CREATE UNIQUE INDEX problems_open ON problems (kind, coalesce(repo, '')) WHERE closed_at IS NULL;
+    """,
 ]
 
 
