@@ -8,7 +8,7 @@ in-memory (fake_github.py), and time is a clock the tests move by hand.
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
+from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub, discover, enrol
 
 from factory import db, orchestrator
 from factory.github import AppAuth, GitHub, Response
@@ -42,8 +42,13 @@ def conn(tmp_path):
 @pytest.fixture
 def fake(clock):
     fake = FakeGitHub(clock=clock)
-    fake.add_repo(REPO)
+    enrol(fake.add_repo(REPO))
     return fake
+
+
+@pytest.fixture(autouse=True)
+def enrolled(conn, fake):
+    discover(conn, fake)
 
 
 @pytest.fixture
@@ -63,7 +68,7 @@ def runner():
 
 @pytest.fixture
 def settings():
-    return orchestrator.Settings(repos=[REPO])
+    return orchestrator.Settings()
 
 
 @pytest.fixture
@@ -272,13 +277,14 @@ def test_a_network_error_backs_off_like_a_5xx(conn, fake, clock, runner, setting
 
 def test_one_failing_repo_backs_off_alone(conn, clock, runner, poller):
     fake = FakeGitHub(clock=clock)
-    fake.add_repo("octo/broken", installation_id=1)
-    fake.add_repo(REPO, installation_id=2)
+    enrol(fake.add_repo("octo/broken", installation_id=1))
+    enrol(fake.add_repo(REPO, installation_id=2))
+    discover(conn, fake)
     github = github_over(
         failing(fake, lambda r: Response(500, {}, b"") if "/octo/broken/" in r.url else None),
         clock,
     )
-    settings = orchestrator.Settings(repos=["octo/broken", REPO])
+    settings = orchestrator.Settings()
 
     for _ in range(3):
         orchestrator.run_once(conn, github, runner, settings, poller=poller)

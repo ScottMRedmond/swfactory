@@ -8,7 +8,9 @@ Tokens are short-lived installation tokens scoped to one repo. They are never
 logged, and never appear in an exception's message or a repr.
 """
 
+import base64
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -119,6 +121,20 @@ def _send(
     return response
 
 
+def _paged(transport: Transport, token: str, url: str, key: str | None = None) -> list[Any]:
+    """Every item of a paginated list, following the `Link: rel="next"` header."""
+    items: list[Any] = []
+    url = f"{url}?per_page=100"
+    while True:
+        response = _send(transport, token, "GET", url)
+        data = response.json()
+        items += data[key] if key else data
+        match = re.search(r'<([^>]+)>;\s*rel="next"', response.headers.get("Link", ""))
+        if match is None:
+            return items
+        url = match.group(1)
+
+
 class AppAuth:
     """Installation tokens for the App, one per repo, cached until near expiry."""
 
@@ -168,6 +184,29 @@ class AppAuth:
         expires = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).timestamp()
         self._tokens[repo] = (data["token"], expires)
         return data["token"]
+
+    def installed_repos(self) -> list[str]:
+        """Every repo the App is installed on, across all its installations.
+
+        Listing an installation's repos takes a token for the whole
+        installation; it's asked for with only `metadata: read`, used for the
+        listing and dropped.
+        """
+        app_jwt = self._jwt()
+        repos: list[str] = []
+        for installation in _paged(self._transport, app_jwt, f"{API}/app/installations"):
+            data = _send(
+                self._transport,
+                app_jwt,
+                "POST",
+                f"{API}/app/installations/{installation['id']}/access_tokens",
+                {"permissions": {"metadata": "read"}},
+            ).json()
+            for page in _paged(
+                self._transport, data["token"], f"{API}/installation/repositories", key="repositories"
+            ):
+                repos.append(page["full_name"])
+        return repos
 
 
 class GitHub:
@@ -290,3 +329,33 @@ class GitHub:
 
     def post_comment(self, repo: str, number: int, body: str) -> None:
         self._call(repo, "POST", f"/issues/{number}/comments", {"body": body})
+
+    def installed_repos(self) -> list[str]:
+        """Every repo the App is installed on."""
+        return self._auth.installed_repos()
+
+    def read_file(self, repo: str, path: str, ref: str) -> str | None:
+        """A file's text at `ref` (a branch or commit), or None if there's no such file."""
+        try:
+            data = self._call(repo, "GET", f"/contents/{quote(path)}", ref=ref).json()
+        except GitHubError as e:
+            if e.status == 404:
+                return None
+            raise
+        if not isinstance(data, dict) or data.get("type") != "file":
+            return None
+        return base64.b64decode(data["content"]).decode()
+
+    def labels(self, repo: str) -> set[str]:
+        """The names of the repo's labels."""
+        url = f"{API}/repos/{repo}/labels"
+        return {label["name"] for label in _paged(self._transport, self._auth.token(repo), url)}
+
+    def create_label(self, repo: str, name: str, color: str, description: str) -> None:
+        """Create a label. One that already exists is left as it is."""
+        try:
+            self._call(repo, "POST", "/labels",
+                       {"name": name, "color": color, "description": description})
+        except GitHubError as e:
+            if e.status != 422:
+                raise

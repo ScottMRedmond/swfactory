@@ -18,9 +18,16 @@ class Stop(Exception):
     pass
 
 
+def enrolled(fake):
+    repo = fake.add_repo(REPO)
+    repo.files[".factory/config.yml"] = "setup: uv sync\ncheck: uv run pytest\n"
+    return repo
+
+
 def test_serve_runs_a_pass_about_every_60_seconds(tmp_path):
     fake = FakeGitHub()
-    issue = fake.add_repo(REPO).add_issue(7, "T", labels=["agent:explore"])
+    repo = enrolled(fake)
+    issue = repo.add_issue(7, "T", labels=["agent:explore"])
     github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock), fake)
     conn = db.connect(tmp_path / "factory.db")
     sleeps = []
@@ -31,7 +38,7 @@ def test_serve_runs_a_pass_about_every_60_seconds(tmp_path):
             raise Stop
 
     with pytest.raises(Stop):
-        orchestrator.serve(conn, github, CannedRunner(), orchestrator.Settings(repos=[REPO]),
+        orchestrator.serve(conn, github, CannedRunner(), orchestrator.Settings(),
                            sleep=sleep)
 
     assert sleeps == [60, 60, 60]
@@ -53,13 +60,13 @@ def test_serve_needs_the_app_id_and_key(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("FACTORY_APP_ID", raising=False)
     monkeypatch.delenv("FACTORY_APP_KEY_FILE", raising=False)
 
-    code = cli.main(["--db", str(tmp_path / "f.db"), "serve", "--repo", REPO, "--fake-runner"])
+    code = cli.main(["--db", str(tmp_path / "f.db"), "serve", "--fake-runner"])
 
     assert code == 2
     assert "FACTORY_APP_ID" in capsys.readouterr().err
 
 
-def test_serve_wires_the_app_the_repos_and_the_fake_runner(tmp_path, monkeypatch):
+def test_serve_wires_the_app_the_enrolled_repos_and_the_fake_runner(tmp_path, monkeypatch):
     key = tmp_path / "app.pem"
     key.write_text(PRIVATE_KEY)
     output = tmp_path / "output.json"
@@ -68,7 +75,8 @@ def test_serve_wires_the_app_the_repos_and_the_fake_runner(tmp_path, monkeypatch
     monkeypatch.setenv("FACTORY_APP_ID", APP_ID)
     monkeypatch.setenv("FACTORY_APP_KEY_FILE", str(key))
     fake = FakeGitHub(clock=time.time)  # the CLI signs its JWTs with the real clock
-    issue = fake.add_repo(REPO).add_issue(7, "T", labels=["agent:explore"])
+    repo = enrolled(fake)
+    issue = repo.add_issue(7, "T", labels=["agent:explore"])
     monkeypatch.setattr(serve, "TRANSPORT", fake)
     sleeps = []
 
@@ -81,7 +89,7 @@ def test_serve_wires_the_app_the_repos_and_the_fake_runner(tmp_path, monkeypatch
 
     with pytest.raises(Stop):
         cli.main(["--db", str(tmp_path / "f.db"), "--logs", str(tmp_path / "logs"),
-                  "serve", "--repo", REPO, "--fake-runner", "--fake-output", str(output)])
+                  "serve", "--fake-runner", "--fake-output", str(output)])
 
     assert "**Verdict:** `easy-call`" in issue.comments[0]["body"]
     logged = [json.loads(line) for line in (tmp_path / "logs" / "factory.log").read_text().splitlines()]
@@ -95,7 +103,7 @@ def test_serve_dispatches_to_actions_without_the_fake_runner(tmp_path, monkeypat
     monkeypatch.setenv("FACTORY_APP_ID", APP_ID)
     monkeypatch.setenv("FACTORY_APP_KEY_FILE", str(key))
     fake = FakeGitHub(clock=time.time)
-    fake.add_repo(REPO).add_issue(7, "T", labels=["agent:explore"])
+    enrolled(fake).add_issue(7, "T", labels=["agent:explore"])
     dispatched = []
 
     def transport(request):
@@ -112,7 +120,7 @@ def test_serve_dispatches_to_actions_without_the_fake_runner(tmp_path, monkeypat
     monkeypatch.setattr(serve, "SLEEP", sleep)
 
     with pytest.raises(Stop):
-        cli.main(["--db", str(tmp_path / "f.db"), "serve", "--repo", REPO])
+        cli.main(["--db", str(tmp_path / "f.db"), "serve"])
 
     [sent] = dispatched
     assert json.loads(sent["inputs"]["dispatch"])["task"] == "explore"

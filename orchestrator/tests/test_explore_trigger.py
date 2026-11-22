@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
-from factory import db, loop, orchestrator, state
+from factory import db, enrolment, loop, orchestrator, state
 from factory.contract import parse_dispatch
 from factory.github import AppAuth, GitHub, GitHubError, Response
 from factory.runner import FakeRunner, RunFiles
@@ -24,10 +24,13 @@ def conn(tmp_path):
     return db.connect(tmp_path / "factory.db")
 
 
+CONFIG = "setup: uv sync\ncheck: uv run pytest\n"
+
+
 @pytest.fixture
 def fake():
     fake = FakeGitHub()
-    fake.add_repo(REPO, head_sha=HEAD)
+    fake.add_repo(REPO, head_sha=HEAD).files[".factory/config.yml"] = CONFIG
     return fake
 
 
@@ -48,7 +51,13 @@ def runner():
 
 @pytest.fixture
 def settings():
-    return orchestrator.Settings(repos=[REPO])
+    return orchestrator.Settings()
+
+
+@pytest.fixture(autouse=True)
+def enrolled(conn, github):
+    """The App's installations are read once, finding REPO enrolled."""
+    enrolment.refresh(conn, github, factory_repo="octo/factory")
 
 
 def runs(conn):
@@ -311,10 +320,11 @@ def test_a_failed_post_is_tried_again_on_the_next_pass(conn, fake, repo, runner,
     assert len(issue.comments) == 1
 
 
-def test_one_repo_failing_doesnt_stop_the_others(conn, fake, runner):
-    fake.add_repo("octo/gadgets")
+def test_one_repo_failing_doesnt_stop_the_others(conn, fake, github, runner, settings):
+    fake.add_repo("octo/gadgets").files[".factory/config.yml"] = CONFIG
     issue = fake.repos["octo/gadgets"].add_issue(3, "T", labels=["agent:explore"])
     fake.repos[REPO].add_issue(7, "T", labels=["agent:explore"])
+    enrolment.refresh(conn, github, factory_repo="octo/factory")
 
     def transport(request):
         if f"/repos/{REPO}/" in request.url:
@@ -322,7 +332,6 @@ def test_one_repo_failing_doesnt_stop_the_others(conn, fake, runner):
         return fake(request)
 
     github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, transport, clock=fake.clock), transport)
-    settings = orchestrator.Settings(repos=[REPO, "octo/gadgets"])
 
     orchestrator.run_once(conn, github, runner, settings)
 

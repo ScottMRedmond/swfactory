@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, cancel, db, logs, serve, state, stats
+from factory import brakes, cancel, db, enrolment, logs, serve, state, stats
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
 DEFAULT_LOGS = Path.home() / ".factory" / "logs"
@@ -160,6 +160,11 @@ def _status(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
             [[f"  {r['id']}", r["repo"], r["task"], r["ticket"], r["attempt"],
               _ago(r["created_at"], now), why] for r, why in held],
         )
+
+    repos = enrolment.summary(conn)
+    print(f"\nrepos: {'the App is installed on' if repos else 'none found yet'}")
+    if repos:
+        _table(["", ""], [[f"  {repo}", what] for repo, what in repos], header=False)
 
     polls = state.last_polls(conn)
     print(f"\npolls: {'last success per repo' if polls else 'none yet'}")

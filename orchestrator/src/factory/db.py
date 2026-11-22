@@ -72,6 +72,32 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
     """,
+    # 5: enrolments, as last read from GitHub (one row per repo the App is or was
+    # installed on), and workflows, which unenrolling stops.
+    """
+    CREATE TABLE repos (
+        repo          TEXT PRIMARY KEY,
+        state         TEXT NOT NULL CHECK (state IN
+                        ('enrolled', 'not_enrolled', 'invalid', 'uninstalled')),
+        enrolment_sha TEXT,
+        config        TEXT,
+        error         TEXT,
+        labels_at     TEXT,
+        checked_at    TEXT NOT NULL
+    );
+    CREATE TABLE workflows (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo      TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        subject   TEXT NOT NULL,
+        branch    TEXT,
+        pr        INTEGER,
+        status    TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'done', 'stopped', 'cancelled')),
+        spec_hash TEXT
+    );
+    CREATE INDEX workflows_repo ON workflows (repo, status);
+    """,
 ]
 
 

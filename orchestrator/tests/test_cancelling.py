@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
+from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub, discover, enrol
 
 from factory import cli, db, loop, orchestrator
 from factory.github import AppAuth, GitHub
@@ -36,8 +36,13 @@ def runner():
 @pytest.fixture
 def fake():
     fake = FakeGitHub()
-    fake.add_repo(REPO)
+    enrol(fake.add_repo(REPO))
     return fake
+
+
+@pytest.fixture(autouse=True)
+def enrolled(conn, fake):
+    discover(conn, fake)
 
 
 @pytest.fixture
@@ -113,13 +118,13 @@ def test_a_late_run_that_has_finished_is_collected_not_timed_out(conn, runner):
 
 
 def test_task_timeouts_default_to_the_documented_limits():
-    assert orchestrator.Settings(repos=[]).timeouts == {
+    assert orchestrator.Settings().timeouts == {
         "explore": 20, "auto-tickets": 20, "implement": 45, "review": 45,
     }
 
 
 def test_the_configured_timeout_travels_in_the_dispatch(conn, github, repo, runner):
-    settings = orchestrator.Settings(repos=[REPO], timeouts={"explore": 7})
+    settings = orchestrator.Settings(timeouts={"explore": 7})
     repo.add_issue(7, "T", labels=["agent:explore"])
 
     orchestrator.run_once(conn, github, runner, settings)
@@ -132,7 +137,7 @@ def test_the_configured_timeout_travels_in_the_dispatch(conn, github, repo, runn
 
 
 def settings():
-    return orchestrator.Settings(repos=[REPO])
+    return orchestrator.Settings()
 
 
 def test_closing_an_issue_cancels_its_queued_rows(conn, github, repo, runner):
@@ -207,7 +212,8 @@ class Clock:
 def test_an_incremental_poll_sees_an_issue_closed_since_the_last_poll(conn, runner):
     clock = Clock()
     fake = FakeGitHub(clock=clock)
-    fake.add_repo(REPO)
+    enrol(fake.add_repo(REPO))
+    discover(conn, fake)
     repo = fake.repos[REPO]
     github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=clock), fake)
     poller = orchestrator.Poller(clock=clock)

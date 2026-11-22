@@ -7,7 +7,7 @@ through `tickets.fit` for the trimming poll can't reach yet (retries).
 import json
 
 import pytest
-from fake_github import APP_ID, APP_LOGIN, PRIVATE_KEY, FakeGitHub
+from fake_github import APP_ID, APP_LOGIN, PRIVATE_KEY, FakeGitHub, discover, enrol
 
 from factory import db, orchestrator, tickets
 from factory.github import AppAuth, GitHub
@@ -24,8 +24,13 @@ def conn(tmp_path):
 @pytest.fixture
 def fake():
     fake = FakeGitHub()
-    fake.add_repo(REPO, head_sha=HEAD)
+    enrol(fake.add_repo(REPO, head_sha=HEAD))
     return fake
+
+
+@pytest.fixture(autouse=True)
+def enrolled(conn, fake):
+    discover(conn, fake)
 
 
 @pytest.fixture
@@ -40,7 +45,7 @@ def github(fake):
 
 @pytest.fixture
 def settings():
-    return orchestrator.Settings(repos=[REPO])
+    return orchestrator.Settings()
 
 
 def queued_dispatches(conn):

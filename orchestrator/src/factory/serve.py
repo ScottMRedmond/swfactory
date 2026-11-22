@@ -6,8 +6,8 @@ doesn't show in `ps`):
 - `FACTORY_APP_ID`: the GitHub App's id
 - `FACTORY_APP_KEY_FILE`: path to the App's private key (PEM)
 
-Until enrolment discovery exists, the repos to poll are named with `--repo`.
-Runs go to GitHub Actions in the target repo (its caller workflow,
+The repos to poll are found from the App's installations (see
+`factory.enrolment`). Runs go to GitHub Actions in the target repo (its caller workflow,
 `.github/workflows/factory.yml`). `--fake-runner` instead finishes every run
 at once with a canned output (or the one in `--fake-output`).
 """
@@ -32,8 +32,6 @@ SLEEP = time.sleep
 
 def add_parser(commands: argparse._SubParsersAction) -> None:
     serve = commands.add_parser("serve", help="run the orchestrator (polls GitHub every minute)")
-    serve.add_argument("--repo", action="append", required=True, metavar="OWNER/NAME",
-                       help="a repo to poll for trigger labels (repeatable)")
     serve.add_argument("--fake-runner", action="store_true",
                        help="finish every run at once with a canned result, without a real runner")
     serve.add_argument("--fake-output", type=Path, metavar="FILE",
@@ -59,7 +57,7 @@ def run(args: argparse.Namespace) -> int:
     auth = AppAuth(app_id, private_key, TRANSPORT)
     github = GitHub(auth, TRANSPORT)
     runner: Runner = CannedRunner(output) if args.fake_runner else ActionsRunner(TRANSPORT, auth)
-    settings = orchestrator.Settings(repos=args.repo)
+    settings = orchestrator.Settings()
     try:
         orchestrator.serve(conn, github, runner, settings, sleep=SLEEP)
     except KeyboardInterrupt:

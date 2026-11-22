@@ -8,6 +8,7 @@ rows while fewer than `limit` are in flight.
 import json
 import logging
 import sqlite3
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -78,11 +79,18 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
 
 
 def tick(
-    conn: sqlite3.Connection, runner: Runner, *, limit: int, now: datetime | None = None
+    conn: sqlite3.Connection,
+    runner: Runner,
+    *,
+    limit: int,
+    now: datetime | None = None,
+    held: Collection[str] = (),
 ) -> None:
+    """Cancel what was asked, collect, then dispatch. Queued rows of the repos
+    in `held` stay queued."""
     cancel_requested(conn, runner)
     collect(conn, runner, now=now)
-    dispatch(conn, runner, limit=limit)
+    dispatch(conn, runner, limit=limit, held=held)
 
 
 def request_cancel(conn: sqlite3.Connection, run_id: int) -> bool:
@@ -216,13 +224,18 @@ def _finish(conn: sqlite3.Connection, run_id: int, outcome: str, result: str | N
         )
 
 
-def dispatch(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
+def dispatch(
+    conn: sqlite3.Connection, runner: Runner, *, limit: int, held: Collection[str] = ()
+) -> None:
+    held = list(held)
     while True:
         in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
         if in_flight >= limit:
             return
         row = conn.execute(
-            "SELECT * FROM runs WHERE status = 'queued' ORDER BY id LIMIT 1"
+            f"""SELECT * FROM runs WHERE status = 'queued'
+                AND repo NOT IN ({", ".join("?" * len(held))}) ORDER BY id LIMIT 1""",
+            held,
         ).fetchone()
         if row is None:
             return
