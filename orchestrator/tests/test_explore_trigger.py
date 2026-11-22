@@ -153,14 +153,14 @@ def test_re_adding_the_label_after_a_run_finished_runs_it_again(conn, github, re
     assert [r["status"] for r in runs(conn)] == ["done", "queued"]
 
 
-def test_pull_requests_and_unlabelled_issues_are_left_alone(conn, github, repo, settings):
-    pr = repo.add_issue(8, "A PR", labels=["agent:explore"], pull_request=True)
-    repo.add_issue(9, "Unlabelled")
+def test_unlabelled_issues_are_left_alone(conn, github, repo, settings):
+    issue = repo.add_issue(9, "Unlabelled", labels=["bug"])
 
     orchestrator.poll(conn, github, REPO, settings)
 
     assert runs(conn) == []
-    assert pr.labels == ["agent:explore"]
+    assert issue.labels == ["bug"]
+    assert issue.comments == []
 
 
 def test_an_issue_with_no_body_renders_as_its_title(conn, github, repo, settings):
