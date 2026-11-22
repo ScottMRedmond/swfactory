@@ -13,6 +13,7 @@ scoped to that repo. Every request is recorded in `.requests`.
 """
 
 import base64
+import hashlib
 import itertools
 import json
 import re
@@ -48,6 +49,7 @@ class Issue:
     state: str = "open"
     pull_request: bool = False
     comments: list[dict[str, Any]] = field(default_factory=list)
+    updated_at: float = 0.0
 
     def json(self, repo: str) -> dict[str, Any]:
         data = {
@@ -58,6 +60,7 @@ class Issue:
             "labels": [{"name": n} for n in self.labels],
             "html_url": f"https://github.com/{repo}/issues/{self.number}",
             "user": {"login": "someone"},
+            "updated_at": _iso(self.updated_at),
         }
         if self.pull_request:
             data["pull_request"] = {"url": "..."}
@@ -77,7 +80,10 @@ class Repo:
     labels: dict[str, dict[str, str]] = field(default_factory=dict)
     installed: bool = True
 
+    clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
+
     def add_issue(self, number, title, body="", labels=(), **kw) -> Issue:
+        kw.setdefault("updated_at", self.clock())
         issue = Issue(number, title, body, list(labels), **kw)
         self.issues[number] = issue
         return issue
@@ -93,7 +99,7 @@ class FakeGitHub:
         self._ids = itertools.count(1)
 
     def add_repo(self, full_name: str, installation_id: int = 100, **kw) -> Repo:
-        repo = Repo(full_name, installation_id=installation_id, **kw)
+        repo = Repo(full_name, installation_id=installation_id, clock=self.clock, **kw)
         self.repos[full_name] = repo
         return repo
 
@@ -120,6 +126,7 @@ class FakeGitHub:
         path = url.path
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         body = json.loads(request.body) if request.body else None
+        self._request_headers = request.headers
         for method, pattern, handler, auth in self._routes():
             m = re.fullmatch(pattern, path)
             if m and method == request.method:
@@ -246,10 +253,17 @@ class FakeGitHub:
         repo = self.repos[f"{owner}/{name}"]
         state = query.get("state", "open")
         wanted = [l for l in query.get("labels", "").split(",") if l]
+        since = _parse_iso(query["since"]) if "since" in query else None
+        if query.get("sort") == "updated":
+            order = sorted(repo.issues.values(), key=lambda i: (-i.updated_at, -i.number))
+        else:
+            order = sorted(repo.issues.values(), key=lambda i: -i.number)
         issues = [
             i
-            for i in sorted(repo.issues.values(), key=lambda i: -i.number)
-            if (state == "all" or i.state == state) and all(l in i.labels for l in wanted)
+            for i in order
+            if (state == "all" or i.state == state)
+            and all(l in i.labels for l in wanted)
+            and (since is None or i.updated_at >= since)
         ]
         per_page = int(query.get("per_page", 30))
         page = int(query.get("page", 1))
@@ -260,7 +274,12 @@ class FakeGitHub:
                 f"{k}={v}" for k, v in {**query, "page": page + 1}.items()
             )
             headers["Link"] = f'<{nxt}>; rel="next"'
-        return _json(200, [i.json(repo.full_name) for i in chunk], headers)
+        response = _json(200, [i.json(repo.full_name) for i in chunk], headers)
+        # Like GitHub: the ETag is a hash of the body, and a matching If-None-Match gets a 304.
+        etag = f'W/"{hashlib.sha256(response.body).hexdigest()[:32]}"'
+        if self._request_headers.get("If-None-Match") == etag:
+            return Response(304, {"ETag": etag}, b"")
+        return Response(response.status, {**response.headers, "ETag": etag}, response.body)
 
     def _get_issue(self, owner, name, number, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues.get(int(number))
@@ -273,12 +292,14 @@ class FakeGitHub:
         if label not in issue.labels:
             return _json(404, {"message": "Label does not exist"})
         issue.labels.remove(label)
+        issue.updated_at = self.clock()
         return _json(200, [{"name": n} for n in issue.labels])
 
     def _comment(self, owner, name, number, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues[int(number)]
         comment = {"id": next(self._ids), "body": body["body"], "user": {"login": "factory[bot]"}}
         issue.comments.append(comment)
+        issue.updated_at = self.clock()
         return _json(201, comment)
 
 
@@ -314,6 +335,34 @@ def _paged(query: dict[str, str], items: list[Any], base: str) -> Response:
         nxt = base + "?" + "&".join(f"{k}={v}" for k, v in {**query, "page": page + 1}.items())
         headers["Link"] = f'<{nxt}>; rel="next"'
     return _json(200, items[(page - 1) * per_page : page * per_page], headers)
+
+
+ENROLMENT = "setup: uv sync\ncheck: uv run pytest\n"
+
+
+def enrol(repo: Repo, config: str = ENROLMENT) -> Repo:
+    """Put `.factory/config.yml` on the repo's default branch."""
+    repo.files[".factory/config.yml"] = config
+    return repo
+
+
+def discover(conn, fake: "FakeGitHub") -> None:
+    """Run enrolment discovery against `fake` with its own client (so it shares
+    no cached tokens with the test's), then forget the requests it made."""
+    from factory import enrolment
+    from factory.github import AppAuth, GitHub
+
+    github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock), fake)
+    enrolment.refresh(conn, github, factory_repo="octo/factory")
+    fake.requests.clear()
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(text: str) -> float:
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
 
 
 def _json(status: int, data: Any, headers: dict[str, str] | None = None) -> Response:

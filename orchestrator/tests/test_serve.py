@@ -8,7 +8,7 @@ from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
 from factory import cli, db, orchestrator, serve
 from factory.contract import parse_result
-from factory.github import AppAuth, GitHub
+from factory.github import AppAuth, GitHub, Response
 from factory.runner import CannedRunner, RunState
 
 REPO = "octo/widgets"
@@ -88,17 +88,41 @@ def test_serve_wires_the_app_the_enrolled_repos_and_the_fake_runner(tmp_path, mo
     monkeypatch.setattr(serve, "SLEEP", sleep)
 
     with pytest.raises(Stop):
-        cli.main(["--db", str(tmp_path / "f.db"), "serve",
-                  "--fake-runner", "--fake-output", str(output)])
+        cli.main(["--db", str(tmp_path / "f.db"), "--logs", str(tmp_path / "logs"),
+                  "serve", "--fake-runner", "--fake-output", str(output)])
 
     assert "**Verdict:** `easy-call`" in issue.comments[0]["body"]
+    logged = [json.loads(line) for line in (tmp_path / "logs" / "factory.log").read_text().splitlines()]
+    posted = [line for line in logged if line["msg"].startswith("posted explore findings")]
+    assert [(line["run"], line["repo"], line["ticket"]) for line in posted] == [(1, REPO, "7")]
 
 
-def test_serve_refuses_to_run_without_a_runner(tmp_path, monkeypatch, capsys):
+def test_serve_dispatches_to_actions_without_the_fake_runner(tmp_path, monkeypatch):
+    key = tmp_path / "app.pem"
+    key.write_text(PRIVATE_KEY)
     monkeypatch.setenv("FACTORY_APP_ID", APP_ID)
-    monkeypatch.setenv("FACTORY_APP_KEY_FILE", str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("FACTORY_APP_KEY_FILE", str(key))
+    fake = FakeGitHub(clock=time.time)
+    enrolled(fake).add_issue(7, "T", labels=["agent:explore"])
+    dispatched = []
 
-    code = cli.main(["--db", str(tmp_path / "f.db"), "serve"])
+    def transport(request):
+        if request.url.endswith(f"/repos/{REPO}/actions/workflows/factory.yml/dispatches"):
+            dispatched.append(json.loads(request.body))
+            return Response(200, {}, json.dumps({"workflow_run_id": 4242}).encode())
+        return fake(request)
 
-    assert code == 2
-    assert "--fake-runner" in capsys.readouterr().err
+    monkeypatch.setattr(serve, "TRANSPORT", transport)
+
+    def sleep(seconds):
+        raise Stop
+
+    monkeypatch.setattr(serve, "SLEEP", sleep)
+
+    with pytest.raises(Stop):
+        cli.main(["--db", str(tmp_path / "f.db"), "serve"])
+
+    [sent] = dispatched
+    assert json.loads(sent["inputs"]["dispatch"])["task"] == "explore"
+    conn = db.connect(tmp_path / "f.db")
+    assert conn.execute("SELECT runner_run_id FROM runs").fetchone()[0] == "4242"

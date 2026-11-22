@@ -367,7 +367,7 @@ def test_factory_status_before_any_refresh_says_so(tmp_path, conn, capsys):
     code = cli.main(["--db", str(tmp_path / "factory.db"), "status"])
 
     assert code == 0
-    assert "no repos found yet" in capsys.readouterr().out
+    assert "repos: none found yet" in capsys.readouterr().out
 
 
 # --- the refresh cadence ------------------------------------------------------------

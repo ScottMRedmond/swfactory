@@ -7,8 +7,9 @@ doesn't show in `ps`):
 - `FACTORY_APP_KEY_FILE`: path to the App's private key (PEM)
 
 The repos to poll are found from the App's installations (see
-`factory.enrolment`). Until a real runner exists, `--fake-runner` is required: it finishes every
-run at once with a canned output (or the one in `--fake-output`).
+`factory.enrolment`). Runs go to GitHub Actions in the target repo (its caller workflow,
+`.github/workflows/factory.yml`). `--fake-runner` instead finishes every run
+at once with a canned output (or the one in `--fake-output`).
 """
 
 import argparse
@@ -19,9 +20,10 @@ import sys
 import time
 from pathlib import Path
 
-from factory import db, orchestrator
+from factory import db, logs, orchestrator
 from factory.github import AppAuth, GitHub, urllib_transport
-from factory.runner import CannedRunner
+from factory.actions_runner import ActionsRunner
+from factory.runner import CannedRunner, Runner
 
 # Seams for tests.
 TRANSPORT = urllib_transport
@@ -42,9 +44,6 @@ def run(args: argparse.Namespace) -> int:
     if not app_id or not key_file:
         print("factory serve: set FACTORY_APP_ID and FACTORY_APP_KEY_FILE", file=sys.stderr)
         return 2
-    if not args.fake_runner:
-        print("factory serve: no real runner yet; pass --fake-runner", file=sys.stderr)
-        return 2
     try:
         private_key = Path(key_file).read_text()
         output = json.loads(args.fake_output.read_text()) if args.fake_output else None
@@ -52,15 +51,19 @@ def run(args: argparse.Namespace) -> int:
         print(f"factory serve: {e}", file=sys.stderr)
         return 2
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler = logs.setup(args.logs)
     args.db.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(args.db)
-    github = GitHub(AppAuth(app_id, private_key, TRANSPORT), TRANSPORT)
+    auth = AppAuth(app_id, private_key, TRANSPORT)
+    github = GitHub(auth, TRANSPORT)
+    runner: Runner = CannedRunner(output) if args.fake_runner else ActionsRunner(TRANSPORT, auth)
     settings = orchestrator.Settings()
     try:
-        orchestrator.serve(conn, github, CannedRunner(output), settings, sleep=SLEEP)
+        orchestrator.serve(conn, github, runner, settings, sleep=SLEEP)
     except KeyboardInterrupt:
         return 0
     finally:
         conn.close()
+        logging.getLogger("factory").removeHandler(handler)
+        handler.close()
     return 0

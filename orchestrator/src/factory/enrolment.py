@@ -191,6 +191,25 @@ def held(conn: sqlite3.Connection) -> set[str]:
     return {r["repo"] for r in rows} | {e.repo for e in polled(conn) if not e.config.enabled}
 
 
+def summary(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Each repo the App is or was installed on, and whether it's polled (for `factory status`)."""
+    return [(r["repo"], _describe(r))
+            for r in conn.execute("SELECT * FROM repos ORDER BY repo").fetchall()]
+
+
+def _describe(row: sqlite3.Row) -> str:
+    sha = (row["enrolment_sha"] or "")[:7]
+    if row["state"] == "enrolled":
+        if not parse_enrolment(row["config"]).enabled:
+            return f"disabled (enabled: false): polled, nothing dispatched; config.yml at {sha}"
+        return f"enrolled: polled; config.yml at {sha}"
+    if row["state"] == "invalid":
+        return f"invalid config.yml at {sha}, not polled: {row['error']}"
+    if row["state"] == "not_enrolled":
+        return f"not enrolled: the App is installed but there's no {CONFIG_PATH}"
+    return "the App was uninstalled; not polled"
+
+
 def _enrolment(row: sqlite3.Row) -> Enrolment:
     return Enrolment(row["repo"], row["enrolment_sha"], parse_enrolment(row["config"]))
 
