@@ -17,8 +17,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import loop
+from factory import state as db_state
 from factory.contract import CONTRACT_VERSION
 from factory.github import GitHub, GitHubError
+from factory.logs import about_run
 from factory.runner import Runner
 
 log = logging.getLogger(__name__)
@@ -91,12 +93,17 @@ def handle_triggers(
                     "timeout_minutes": settings.timeouts["explore"],
                 },
             )
-            log.info("queued explore run %s for %s#%s", run_id, repo, ticket)
+            log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
+                     extra=about_run(id=run_id, repo=repo, ticket=ticket))
         github.remove_label(repo, issue["number"], EXPLORE_LABEL)
 
 
 def _label_names(issue: dict[str, Any]) -> set[str]:
     return {l["name"] if isinstance(l, dict) else l for l in issue.get("labels", [])}
+
+
+def _about(row: sqlite3.Row) -> dict[str, Any]:
+    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
 
 # --- polling -------------------------------------------------------------------
@@ -188,6 +195,7 @@ class Poller:
         state.wait = settings.poll_seconds
         state.next_at = now + state.wait
         state.failing_since, state.alerted = None, False
+        db_state.record_poll(conn, repo)
 
     def _failed(
         self,
@@ -201,17 +209,19 @@ class Poller:
         if until is not None:
             state.next_at = until
             log.warning("polling %s was rate limited until %s: %s", repo,
-                        datetime.fromtimestamp(until, UTC).isoformat(timespec="seconds"), error)
+                        datetime.fromtimestamp(until, UTC).isoformat(timespec="seconds"), error,
+                        extra={"repo": repo})
         else:
             state.wait = min(max(state.wait, settings.poll_seconds) * 2, MAX_BACKOFF_SECONDS)
             state.next_at = now + state.wait
-            log.warning("polling %s failed, next try in %.0f s: %s", repo, state.wait, error)
+            log.warning("polling %s failed, next try in %.0f s: %s", repo, state.wait, error,
+                        extra={"repo": repo})
         if state.failing_since is None:
             state.failing_since = now
         if not state.alerted and now - state.failing_since >= FAILING_ALERT_SECONDS:
             state.alerted = True
             log.error("polling %s has failed for %.0f minutes: %s",
-                      repo, (now - state.failing_since) / 60, error)
+                      repo, (now - state.failing_since) / 60, error, extra={"repo": repo})
 
 
 def _rate_limit_until(error: GitHubError, now: float) -> float | None:
@@ -268,9 +278,10 @@ def handle_finished(conn: sqlite3.Connection, github: GitHub, runner: Runner) ->
                 body = render_explore_comment(row["id"], result["output"], link)
                 github.post_comment(row["repo"], int(row["ticket"]), body)
                 log.info("posted explore findings of run %s on %s#%s",
-                         row["id"], row["repo"], row["ticket"])
+                         row["id"], row["repo"], row["ticket"], extra=_about(row))
         except (GitHubError, OSError) as e:
-            log.error("run %s: writing the result to GitHub failed: %s", row["id"], e)
+            log.error("run %s: writing the result to GitHub failed: %s", row["id"], e,
+                      extra=_about(row))
             continue
         with conn:
             conn.execute(

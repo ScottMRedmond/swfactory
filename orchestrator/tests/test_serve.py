@@ -80,10 +80,13 @@ def test_serve_wires_the_app_the_repos_and_the_fake_runner(tmp_path, monkeypatch
     monkeypatch.setattr(serve, "SLEEP", sleep)
 
     with pytest.raises(Stop):
-        cli.main(["--db", str(tmp_path / "f.db"), "serve", "--repo", REPO,
-                  "--fake-runner", "--fake-output", str(output)])
+        cli.main(["--db", str(tmp_path / "f.db"), "--logs", str(tmp_path / "logs"),
+                  "serve", "--repo", REPO, "--fake-runner", "--fake-output", str(output)])
 
     assert "**Verdict:** `easy-call`" in issue.comments[0]["body"]
+    logged = [json.loads(line) for line in (tmp_path / "logs" / "factory.log").read_text().splitlines()]
+    posted = [line for line in logged if line["msg"].startswith("posted explore findings")]
+    assert [(line["run"], line["repo"], line["ticket"]) for line in posted] == [(1, REPO, "7")]
 
 
 def test_serve_refuses_to_run_without_a_runner(tmp_path, monkeypatch, capsys):
