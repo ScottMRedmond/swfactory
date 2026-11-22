@@ -207,6 +207,7 @@ class FakeGitHub:
             ("GET", repo + r"/branches/([^/]+)", self._branch, "token"),
             ("GET", repo + "/issues", self._list_issues, "token"),
             ("GET", repo + r"/issues/(\d+)", self._get_issue, "token"),
+            ("POST", repo + "/issues", self._create_issue, "token"),
             ("DELETE", repo + r"/issues/(\d+)/labels/(.+)", self._remove_label, "token"),
             ("POST", repo + r"/issues/(\d+)/comments", self._comment, "token"),
             ("POST", repo + r"/issues/(\d+)/labels", self._add_labels, "token"),
@@ -364,6 +365,16 @@ class FakeGitHub:
         if issue is None:
             return _json(404, {"message": "Not Found"})
         return _json(200, issue.json(f"{owner}/{name}"))
+
+    def _create_issue(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        for label in body.get("labels", []):
+            if label not in repo.labels:  # like GitHub (with push access): created
+                repo.labels[label] = {"name": label, "color": "ededed", "description": ""}
+        number = max(repo.issues, default=0) + 1
+        issue = repo.add_issue(number, body["title"], body.get("body"), body.get("labels", []),
+                               author=APP_LOGIN, updated_at=self.clock())
+        return _json(201, issue.json(repo.full_name))
 
     def _remove_label(self, owner, name, number, label, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues[int(number)]

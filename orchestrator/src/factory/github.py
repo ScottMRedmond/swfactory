@@ -325,6 +325,15 @@ class GitHub:
         new_etag = next((v for k, v in first.headers.items() if k.lower() == "etag"), None)
         return self._pages(repo, first, **query), new_etag
 
+    def issues_with_label(self, repo: str, label: str) -> list[dict[str, Any]]:
+        """Issues and PRs carrying `label`, open or closed."""
+        return list(self._each(repo, "/issues", state="all", labels=label))
+
+    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> int:
+        """Open an issue; returns its number."""
+        data = {"title": title, "body": body, "labels": labels}
+        return int(self._call(repo, "POST", "/issues", data).json()["number"])
+
     def get_issue(self, repo: str, number: int) -> dict[str, Any]:
         return self._call(repo, "GET", f"/issues/{number}").json()
 
