@@ -168,6 +168,15 @@ class AppAuth:
         """The App itself (`id`, `slug`, ...), fetched with the App's JWT."""
         return _send(self._transport, self._jwt(), "GET", f"{API}/app").json()
 
+    def installation(self, repo: str) -> dict[str, Any] | None:
+        """The App's installation on `repo`, or None if it isn't installed there."""
+        try:
+            return _send(self._transport, self._jwt(), "GET", f"{API}/repos/{repo}/installation").json()
+        except GitHubError as e:
+            if e.status == 404:
+                return None
+            raise
+
     def token(self, repo: str) -> str:
         cached = self._tokens.get(repo)
         if cached and cached[1] - TOKEN_MARGIN > self._clock():
@@ -333,6 +342,16 @@ class GitHub:
     def installed_repos(self) -> list[str]:
         """Every repo the App is installed on."""
         return self._auth.installed_repos()
+
+    def app_installed(self, repo: str) -> bool:
+        """Whether the App is installed on `repo` (with access to it)."""
+        return self._auth.installation(repo) is not None
+
+    def branch_rules(self, repo: str, branch: str) -> list[dict[str, Any]]:
+        """The active ruleset rules that apply to a branch name (which needn't
+        exist), each `{type, parameters?, ruleset_source, ruleset_id, ...}`."""
+        url = f"{API}/repos/{repo}/rules/branches/{quote(branch, safe='')}"
+        return _paged(self._transport, self._auth.token(repo), url)
 
     def read_file(self, repo: str, path: str, ref: str) -> str | None:
         """A file's text at `ref` (a branch or commit), or None if there's no such file."""
