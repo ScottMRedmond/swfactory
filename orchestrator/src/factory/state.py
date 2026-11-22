@@ -77,6 +77,20 @@ def set_runner_refused_at(conn: sqlite3.Connection, at: str | None) -> None:
 # --- Claude usage ---
 
 
+# --- the factory's owner ---
+#
+# The GitHub login in factory-config.yml on the factory repo's main, read on
+# the enrolment refresh. Factory problem issues are assigned to them.
+
+
+def owner(conn: sqlite3.Connection) -> str | None:
+    return _get(conn, "owner")
+
+
+def set_owner(conn: sqlite3.Connection, login: str) -> None:
+    _set(conn, "owner", login)
+
+
 @dataclass(frozen=True)
 class UsageReading:
     read_at: str
@@ -105,6 +119,16 @@ def latest_usage(conn: sqlite3.Connection) -> UsageReading | None:
         return None
     limits = None if row["limits"] is None else json.loads(row["limits"])
     return UsageReading(read_at=row["read_at"], limits=limits, error=row["error"])
+
+
+def usage_unreadable_since(conn: sqlite3.Connection) -> str | None:
+    """When the latest run of unreadable readings began, or None if the latest
+    reading was read (or there's none)."""
+    row = conn.execute(
+        """SELECT min(read_at) AS since FROM usage_readings
+           WHERE id > coalesce((SELECT max(id) FROM usage_readings WHERE error IS NULL), 0)"""
+    ).fetchone()
+    return row["since"]
 
 
 # --- polls ---
@@ -170,3 +194,26 @@ def close_problem(conn: sqlite3.Connection, kind: str, *, repo: str | None = Non
 
 def open_problems(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM problems WHERE closed_at IS NULL ORDER BY id").fetchall()
+
+
+def unsynced_problems(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Problems whose GitHub issue is behind: open ones with no issue yet or a
+    changed summary, and closed ones whose issue isn't closed yet."""
+    return conn.execute(
+        """SELECT * FROM problems
+           WHERE (closed_at IS NULL AND (issue IS NULL OR posted IS NOT summary))
+              OR (closed_at IS NOT NULL AND issue_closed_at IS NULL)
+           ORDER BY id"""
+    ).fetchall()
+
+
+def problem_posted(conn: sqlite3.Connection, problem_id: int, issue: str, summary: str) -> None:
+    """The problem's issue (`owner/repo#n`) now says `summary`."""
+    with conn:
+        conn.execute("UPDATE problems SET issue = ?, posted = ? WHERE id = ?",
+                     (issue, summary, problem_id))
+
+
+def problem_issue_closed(conn: sqlite3.Connection, problem_id: int) -> None:
+    with conn:
+        conn.execute("UPDATE problems SET issue_closed_at = ? WHERE id = ?", (_now(), problem_id))
