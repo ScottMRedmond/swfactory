@@ -270,7 +270,7 @@ def test_an_in_flight_run_of_an_unenrolled_repo_finishes_but_posts_nothing(
     row = loop.get_run(conn, 1)
     assert (row["status"], row["outcome"]) == ("done", "succeeded")
     assert row["result"] is not None
-    assert busy.issues[1].comments == []
+    assert busy.issues[1].posts == []
 
 
 def test_a_queued_run_of_an_unenrolled_repo_is_never_dispatched(

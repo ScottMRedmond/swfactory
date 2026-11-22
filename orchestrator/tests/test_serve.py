@@ -42,7 +42,7 @@ def test_serve_runs_a_pass_about_every_60_seconds(tmp_path):
                            sleep=sleep)
 
     assert sleeps == [60, 60, 60]
-    assert len(issue.comments) == 1
+    assert len(issue.posts) == 1
 
 
 def test_the_canned_runner_finishes_each_run_with_a_valid_result():
@@ -91,7 +91,7 @@ def test_serve_wires_the_app_the_enrolled_repos_and_the_fake_runner(tmp_path, mo
         cli.main(["--db", str(tmp_path / "f.db"), "--logs", str(tmp_path / "logs"),
                   "serve", "--fake-runner", "--fake-output", str(output)])
 
-    assert "**Verdict:** `easy-call`" in issue.comments[0]["body"]
+    assert "**Verdict:** `easy-call`" in issue.posts[0]["body"]
     logged = [json.loads(line) for line in (tmp_path / "logs" / "factory.log").read_text().splitlines()]
     posted = [line for line in logged if line["msg"].startswith("posted explore findings")]
     assert [(line["run"], line["repo"], line["ticket"]) for line in posted] == [(1, REPO, "7")]

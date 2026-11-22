@@ -336,8 +336,13 @@ class GitHub:
             if e.status != 404:
                 raise
 
-    def post_comment(self, repo: str, number: int, body: str) -> None:
-        self._call(repo, "POST", f"/issues/{number}/comments", {"body": body})
+    def post_comment(self, repo: str, number: int, body: str) -> int:
+        """Comment on an issue or PR; returns the new comment's id."""
+        return int(self._call(repo, "POST", f"/issues/{number}/comments", {"body": body}).json()["id"])
+
+    def edit_comment(self, repo: str, comment_id: int, body: str) -> None:
+        """Replace a comment's body. Raises `GitHubError` (404) if it's gone."""
+        self._call(repo, "PATCH", f"/issues/comments/{comment_id}", {"body": body})
 
     def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
         """Add labels to an issue or PR, keeping the ones it has."""
