@@ -117,7 +117,7 @@ def start_implement(
         return None
     workflow_id = base.start(conn, repo=repo, kind=KIND, subject=ticket)
     try:
-        run_id = _enqueue_implement(conn, github, settings, issue, repo, workflow_id,
+        run_id = enqueue_implement(conn, github, settings, issue, repo, workflow_id,
                                     (triggered_by.login, triggered_by.id))
     except tickets.TooBig as e:
         github.post_comment(repo, number,
@@ -271,7 +271,7 @@ def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dic
     discarded = result["outcome"] == "failed"
     if not discarded:
         store = _store(ctx)
-        checked = _checked(ctx, store, run, dispatch["base_sha"])
+        checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
         if checked is not None:
             try:
                 store.push(repo, run["id"], dispatch["branch"])
@@ -393,7 +393,7 @@ def _implemented(
         return
     dispatch = json.loads(run["dispatch"])
     store = bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
-    checked = _checked(ctx, store, run, dispatch["base_sha"])
+    checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
     assert checked is not None  # built always has commits
     store.push(repo, run["id"], dispatch["branch"])
     issue = ctx.github.get_issue(repo, number)
@@ -402,7 +402,7 @@ def _implemented(
     notes = []
     if test_paths and not any(bundles.matches(f, test_paths) for f in checked.files):
         notes.append("⚠️ no test files changed")
-    if _ticket_changed(ctx, run, dispatch, issue):
+    if ticket_changed(ctx, run, dispatch, issue):
         notes.append("⚠️ the ticket changed after this run started")
     body = render_pr_body(number, run["id"], link, output.get("pr_body"), checked.log, notes)
     pr = ctx.github.open_draft_pull(repo, head=dispatch["branch"],
@@ -420,7 +420,7 @@ def _implemented(
                       pr_base_sha=dispatch["base_sha"])
 
 
-def _checked(
+def checked_bundle(
     ctx: Context, store: bundles.Store, run: sqlite3.Row, base_sha: str
 ) -> bundles.Checked | None:
     """The run's bundle as checked on collection, or None for a review that
@@ -444,16 +444,19 @@ def _checked(
                        test_paths=_test_paths(ctx, run["repo"]))
 
 
-def _ticket_changed(
-    ctx: Context, run: sqlite3.Row, dispatch: dict[str, Any], issue: dict[str, Any]
+def ticket_changed(
+    ctx: Context, run: sqlite3.Row, dispatch: dict[str, Any], issue: dict[str, Any],
+    ticket: tickets.Ticket | None = None,
 ) -> bool:
     """Whether the ticket was edited, or got a comment from someone with write
-    access, after the run's `ticket.md` was rendered."""
-    ticket = tickets.fetch(ctx.github, run["repo"], issue)
+    access, after the run's `ticket.md` was rendered. `ticket` is the ticket
+    as it renders now (default: the issue and its comments); its orchestrator
+    sections count as part of the ticket."""
+    ticket = ticket or tickets.fetch(ctx.github, run["repo"], issue)
     rendered = dispatch["ticket_markdown"]
     if rendered.startswith("> Trimmed"):
         rendered = rendered.split("\n", 2)[2]
-    head = tickets.render(replace(ticket, comments=[], history=[]))
+    head = tickets.render(replace(ticket, comments=[]))
     if not rendered.startswith(head):
         return True
     rest = rendered[len(head):]
@@ -469,12 +472,14 @@ def _when(iso: str) -> datetime:
 
 
 def give_up(
-    ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, again: str | None = None
+    ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, again: str | None = None,
+    stop: bool = True,
 ) -> None:
     """The ticket ran out of attempts: a notice, `agent:blocked`, and the
     workflow stops. For review they go on the PR, which stays a draft: marking
     it ready would say someone had read it. `again` is the label that starts
-    over (default: the task's own)."""
+    over (default: the task's own). With `stop` False (a spec ticket, whose
+    spec goes on without it), only the ticket is labelled."""
     repo, number = run["repo"], int(run["ticket"])
     if run["task"] == "review":
         number = json.loads(run["dispatch"])["pr_number"]
@@ -491,6 +496,9 @@ def give_up(
     if run["task"] == "review":
         ctx.github.add_labels(repo, number, ["agent:blocked"])
         base.end(ctx, workflow, "stopped", int(run["ticket"]))
+    elif not stop:
+        ctx.github.add_labels(repo, number, ["agent:blocked"])
+        ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     else:
         base.end(ctx, workflow, "stopped", number, "agent:blocked")
     log.info("gave up on %s#%s after run %s ended %s", repo, number, run["id"], ended,
@@ -592,20 +600,23 @@ def _queue_implement(ctx: Context, after: sqlite3.Row, issue: dict[str, Any]) ->
     ).fetchone():
         return
     repo, ticket = after["repo"], after["ticket"]
-    run_id = _enqueue_implement(ctx.conn, ctx.github, ctx.settings, issue, repo,
+    run_id = enqueue_implement(ctx.conn, ctx.github, ctx.settings, issue, repo,
                                 after["workflow_id"],
                                 (after["triggered_by"], after["triggered_by_id"]))
     log.info("queued implement run %s for %s#%s after explore run %s", run_id, repo, ticket,
              after["id"], extra=about_run(id=run_id, repo=repo, ticket=ticket))
 
 
-def _enqueue_implement(
+def enqueue_implement(
     conn: sqlite3.Connection, github: GitHub, settings: "Settings", issue: dict[str, Any],
-    repo: str, workflow_id: int, triggered_by: tuple[str, int],
+    repo: str, workflow_id: int, triggered_by: tuple[str, int], *,
+    ticket_md: tickets.Ticket | None = None, base_sha: str | None = None,
 ) -> int:
     """Queue implement for `issue` in workflow `workflow_id`, crediting
-    `triggered_by` (login, user id). Raises `tickets.TooBig` if the ticket is
-    too big to dispatch."""
+    `triggered_by` (login, user id). `ticket_md` is the ticket as rendered
+    into `ticket.md` (default: the issue and its comments), `base_sha` where
+    it starts (default: the default branch's head; `prepare` freshens it at
+    dispatch). Raises `tickets.TooBig` if the ticket is too big to dispatch."""
     ticket = str(issue["number"])
     login, user = triggered_by
     enrolment = enrolments.get(conn, repo)
@@ -616,7 +627,7 @@ def _enqueue_implement(
             "repo": repo,
             "task": "implement",
             "ticket": ticket,
-            "base_sha": github.default_branch_head(repo),
+            "base_sha": base_sha or github.default_branch_head(repo),
             # Sized with the longest run id; `enqueue` names it with the real one.
             "branch": _branch(ticket, tickets.RUN_ID_ROOM),
             "triggered_by": {"login": login, "id": user},
@@ -624,7 +635,7 @@ def _enqueue_implement(
             "model": settings.model("implement", enrolment),
             "timeout_minutes": settings.timeout("implement", enrolment),
         },
-        tickets.fetch(github, repo, issue),
+        ticket_md or tickets.fetch(github, repo, issue),
     )
     return loop.enqueue(conn, repo=repo, task="implement", ticket=ticket, dispatch=dispatch,
                         workflow_id=workflow_id, triggered_by=login, triggered_by_id=user,
