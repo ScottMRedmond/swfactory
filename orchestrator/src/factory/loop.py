@@ -7,6 +7,7 @@ rows while fewer than `limit` are in flight.
 
 import json
 import logging
+import re
 import sqlite3
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,25 @@ from factory.contract import ContractError, Task, parse_result
 from factory.runner import Runner, RunFiles, RunState
 
 log = logging.getLogger(__name__)
+
+# Token-like patterns. Agent prose holding one makes the result invalid, so
+# nothing is posted (software-factory.md, "Secrets in prose").
+SECRET_PATTERNS = {
+    "Claude token": re.compile(r"sk-ant-"),
+    "GitHub token": re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
+    "private key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+}
+
+
+def find_secret(value: Any) -> str | None:
+    """The kind of the first token-like string anywhere in `value`, or None."""
+    if isinstance(value, str):
+        return next((kind for kind, p in SECRET_PATTERNS.items() if p.search(value)), None)
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        return next((s for s in map(find_secret, value) if s is not None), None)
+    return None
 
 
 def _now() -> str:
@@ -94,6 +114,8 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None]:
         result = parse_result(data, task=row["task"])
         if result.run_id != row["id"]:
             raise ContractError(f"result.json is for run {result.run_id}")
+        if (secret := find_secret(data.get("output"))) is not None:
+            raise ContractError(f"output holds something that looks like a {secret}")
     except ContractError as e:
         log.warning("run %s: invalid result.json: %s", row["id"], e)
         return "invalid", kept

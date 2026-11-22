@@ -6,6 +6,7 @@ with the repo the run happens in.
 """
 
 import itertools
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -109,3 +110,37 @@ class FakeRunner:
     def forget(self, runner_run_id: str) -> None:
         """The runner no longer knows the run, e.g. its files expired."""
         del self._runs[runner_run_id]
+
+
+CANNED_EXPLORE_OUTPUT = {
+    "verdict": "needs-a-human",
+    "summary": "Canned findings from the factory's fake runner; no agent ran.",
+    "findings": "The fake runner returns this text for every explore run.",
+    "plan": [],
+    "files": [],
+    "questions": ["This is a demo: is the comment under the App's identity?"],
+}
+
+
+class CannedRunner(FakeRunner):
+    """A FakeRunner that finishes every explore run at once with a canned output.
+
+    For demonstrating the orchestrator against real GitHub before a real
+    runner exists (`factory serve --fake-runner`).
+    """
+
+    def __init__(self, explore_output: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.explore_output = explore_output or CANNED_EXPLORE_OUTPUT
+
+    def dispatch(self, repo: str, dispatch: dict[str, Any]) -> str:
+        runner_run_id = super().dispatch(repo, dispatch)
+        result = {
+            "contract_version": 1,
+            "run_id": dispatch["run_id"],
+            "task": dispatch["task"],
+            "outcome": "succeeded",
+            "output": self.explore_output if dispatch["task"] == "explore" else {},
+        }
+        self.finish(runner_run_id, RunFiles(result_json=json.dumps(result).encode()))
+        return runner_run_id
