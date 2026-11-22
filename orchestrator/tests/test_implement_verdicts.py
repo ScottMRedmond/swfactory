@@ -4,6 +4,7 @@ as a draft PR, or nothing is pushed. GitHub's REST API is in-memory
 (fake_github.py); its git side is a real bare repo (git_repos.py)."""
 
 import json
+import shutil
 from dataclasses import replace
 
 import pytest
@@ -325,4 +326,28 @@ def test_git_trouble_while_checking_leaves_the_run_to_be_collected_again(
     orchestrator.run_once(conn, github, runner, settings)
     assert loop.get_run(conn, row["id"])["outcome"] == "succeeded"
     assert len(pulls(repo)) == 1
+
+
+def test_a_run_whose_commits_are_lost_everywhere_stops_with_one_notice(
+    conn, github, repo, remote, runner, settings
+):
+    """A crash left the run unhandled, then the git store was wiped and the
+    runner's files expired: nothing can bring the commits back."""
+    issue = ticket(repo)
+    row = implement_dispatched(conn, github, runner, settings)
+    finish_implement(conn, github, runner, settings, row, commits(remote, row))
+    conn.execute("UPDATE runs SET handled_at = NULL WHERE id = ?", (row["id"],))
+    shutil.rmtree(settings.git_dir)
+    runner.forget(row["runner_run_id"])
+    before = len(issue.posts)
+
+    for _ in range(3):
+        orchestrator.run_once(conn, github, runner, settings)
+
+    assert loop.get_run(conn, row["id"])["handled_at"] is not None
+    [notice] = issue.posts[before:]
+    assert "lost" in notice["body"] and "agent:implement" in notice["body"]
+    assert "needs-a-human" in issue.labels and "agent:in-progress" not in issue.labels
+    [workflow] = conn.execute("SELECT * FROM workflows").fetchall()
+    assert workflow["status"] == "stopped"
 

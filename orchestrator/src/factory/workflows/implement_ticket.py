@@ -425,17 +425,17 @@ def checked_bundle(
 ) -> bundles.Checked | None:
     """The run's bundle as checked on collection, or None for a review that
     made no fixes. If the store lost it (e.g. it was wiped), the run's files
-    are fetched and checked again."""
+    are fetched and checked again; `bundles.Lost` if the runner has none."""
     checked = store.checked(run["repo"], run["id"], base_sha)
     if checked is not None:
         return checked
     files = ctx.runner.files(run["repo"], run["runner_run_id"])
     if files is None:
-        raise bundles.GitError(f"run {run['id']}'s files are gone from the runner")
+        raise bundles.Lost(f"run {run['id']}'s files are gone from the runner")
     if files.bundle is None and run["task"] == "review":
         return None  # review's bundle may be empty: no bundle at all
     if files.bundle is None:
-        raise bundles.GitError(f"run {run['id']}'s bundle is gone from the runner")
+        raise bundles.Lost(f"run {run['id']}'s bundle is gone from the runner")
     dispatch = json.loads(run["dispatch"])
     output = json.loads(run["result"]).get("output") or {}
     return store.check(run["repo"], run["id"], files.bundle, task=run["task"],
