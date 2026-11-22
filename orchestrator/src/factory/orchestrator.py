@@ -28,7 +28,7 @@ from factory.github import GitHub, GitHubError
 from factory.logs import about_run
 from factory.runner import Runner
 from factory.tickets import render_notice
-from factory.workflows import implement_spec, implement_ticket, review_pr
+from factory.workflows import implement_spec, implement_ticket
 
 log = logging.getLogger(__name__)
 
@@ -153,12 +153,7 @@ def _start_review(
                             render_notice(FORK_NOTICE, [who.login] if who else None))
         log.info("%s#%s is a fork PR: not reviewed", repo, number, extra={"repo": repo})
         return
-    if implement_spec.start_review(conn, github, settings, issue, enrolment,
-                                   decision.triggered_by):
-        return
-    if not implement_ticket.start_review(conn, github, settings, issue, enrolment,
-                                         decision.triggered_by):
-        review_pr.start(conn, github, settings, issue, enrolment, decision.triggered_by)
+    workflows.start_review(conn, github, settings, issue, enrolment, decision.triggered_by)
 
 
 def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
@@ -314,10 +309,8 @@ class Poller:
                 )
             if issues is not None:
                 cancel_closed(conn, repo, issues, full_scan=state.cursor is None)
-                implement_ticket.cancel_closed_prs(conn, github, settings, repo, issues,
-                                                   full_scan=state.cursor is None)
-                implement_spec.cancel_closed_prs(conn, github, settings, repo, issues,
-                                                 full_scan=state.cursor is None)
+                workflows.cancel_closed_prs(conn, github, settings, repo, issues,
+                                            full_scan=state.cursor is None)
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:
@@ -413,7 +406,7 @@ def run_once(
     ctx = workflows.Context(conn, github, settings, runner)
     if woke and poller is not None:
         usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
-    implement_spec.advance(ctx)
+    workflows.advance(ctx)
     loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
               check=_bundle_check(conn, github, settings),
               prepare=_try_later(lambda row: workflows.prepare(ctx, row)),

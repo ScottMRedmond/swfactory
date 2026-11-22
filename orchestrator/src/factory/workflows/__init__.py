@@ -2,21 +2,41 @@
 
 Each workflow is a module behind one interface (`base.Workflow`): it receives
 a finished run and decides what to queue next. Adding a workflow means adding
-a module and listing it in `BY_KIND`.
+a module and listing it in `BY_KIND`, and routing the trigger label that starts
+it in `orchestrator.handle_triggers` (which label starts which workflow, and
+`implement` on a spec's ticket joining its spec, is read there in one place).
+
+A module may also define these optional hooks, which the orchestrator calls
+on every workflow that has them, through this module:
+
+- `advance(ctx)`: each pass, before dispatching (`advance`).
+- `cancel_closed_prs(conn, github, settings, repo, issues, *, full_scan)`:
+  each poll, for PRs closed without merging (`cancel_closed_prs`).
+- `start_review(conn, github, settings, pr, enrolment, triggered_by) -> bool`:
+  `agent:review` on a PR; True if the PR is the workflow's and it acted
+  (`start_review`).
 """
 
 import logging
 import sqlite3
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from factory import attempts, bundles
+from factory.enrolment import Enrolment
+from factory.github import GitHub
 from factory.logs import about_run
 from factory.tickets import render_notice
 from factory.workflows import base
 from factory.workflows import implement_spec, implement_ticket, review_pr
 from factory.workflows.base import Context, Workflow
 
-__all__ = ["BY_KIND", "Context", "Workflow", "on_result", "prepare"]
+if TYPE_CHECKING:
+    from factory.orchestrator import Settings
+    from factory.triggers import Added
+
+__all__ = ["BY_KIND", "Context", "Workflow", "advance", "cancel_closed_prs", "on_result",
+           "prepare", "start_review"]
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +45,38 @@ BY_KIND: dict[str, Workflow] = {  # type: ignore[dict-item]
     implement_spec.KIND: implement_spec,
     review_pr.KIND: review_pr,
 }
+
+
+def _hooks(name: str) -> list[Callable[..., Any]]:
+    return [getattr(m, name) for m in BY_KIND.values() if hasattr(m, name)]
+
+
+def advance(ctx: Context) -> None:
+    """Each pass, every workflow's `advance` hook (e.g. a spec's build queue)."""
+    for hook in _hooks("advance"):
+        hook(ctx)
+
+
+def cancel_closed_prs(
+    conn: sqlite3.Connection, github: GitHub, settings: "Settings", repo: str,
+    issues: list[dict[str, Any]], *, full_scan: bool,
+) -> None:
+    """Each poll, every workflow ends those of its own whose PR a human closed
+    without merging."""
+    for hook in _hooks("cancel_closed_prs"):
+        hook(conn, github, settings, repo, issues, full_scan=full_scan)
+
+
+def start_review(
+    conn: sqlite3.Connection, github: GitHub, settings: "Settings", pr: dict[str, Any],
+    enrolment: Enrolment, triggered_by: "Added | None",
+) -> None:
+    """`agent:review` on a (non-fork) PR: the workflow that owns the PR
+    reviews it again; a PR no workflow owns gets a review-pr workflow."""
+    for hook in _hooks("start_review"):
+        if hook(conn, github, settings, pr, enrolment, triggered_by):
+            return
+    review_pr.start(conn, github, settings, pr, enrolment, triggered_by)
 
 
 def on_result(ctx: Context, run: sqlite3.Row) -> None:
