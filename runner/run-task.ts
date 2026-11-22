@@ -33,10 +33,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { AGENT_DIR, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
+import { AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
 import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
 import { loadContracts, type Contract, type Contracts } from "./contract";
 import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
+import { expandIncludes } from "./prompt-includes";
+import { blockersFirst } from "./tasks/auto-tickets/output";
 
 const RUNNER = dirname(fileURLToPath(import.meta.url));
 
@@ -54,6 +56,7 @@ type Dispatch = {
   model?: string;
   branch?: string;
   triggered_by?: TriggeredBy;
+  older_issues?: { ticket: string; title: string }[];
 };
 
 type Check = { passed: boolean; output_tail: string };
@@ -212,6 +215,12 @@ const AGENT_TASKS = ["explore", "implement", "review", "auto-tickets"];
 // Tasks whose result carries a `check` (review's check_before/check_after
 // and its other steps are the review task's).
 const CHECKED_TASKS = ["implement", "smoke"];
+// Auto-tickets only reads the repo and writes text, so it needs no setup.
+const NO_SETUP_TASKS = ["auto-tickets"];
+// Rules a task's output must follow that its JSON Schema can't express.
+const OUTPUT_RULES: Record<string, (output: unknown) => string | null> = {
+  "auto-tickets": blockersFirst,
+};
 
 // The task's prompt (runner/tasks/<task>/prompt.md, from the task tickets)
 // followed by what every agent task is told: where the ticket is, and the
@@ -220,7 +229,9 @@ const CHECKED_TASKS = ["implement", "smoke"];
 const taskPrompt = (contract: Contract, task: string, enrolment: Enrolment): string => {
   const file = join(RUNNER, "tasks", task, "prompt.md");
   const own = existsSync(file)
-    ? readFileSync(file, "utf8").trimEnd().replaceAll("{{check}}", () => enrolment.check) + "\n\n"
+    ? expandIncludes(readFileSync(file, "utf8"), join(RUNNER, ".."))
+        .trimEnd()
+        .replaceAll("{{check}}", () => enrolment.check) + "\n\n"
     : "";
   return [
     `${own}## Your output`,
@@ -242,6 +253,10 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
   if (dispatch.ticket_markdown !== undefined) {
     putFile(container, TICKET, withPreviousAttempt(dispatch.ticket_markdown, dispatch.previous_attempt));
   }
+  if (dispatch.older_issues !== undefined) {
+    const list = dispatch.older_issues.map((i) => `- #${i.ticket} ${i.title}\n`).join("");
+    putFile(container, OLDER_ISSUES, list || "None.\n");
+  }
   const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
   return runAgent({
     container,
@@ -249,7 +264,8 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
     model: dispatch.model!,
     prompt: taskPrompt(contract, dispatch.task, enrolment),
     timeoutSeconds: minutes * 60,
-    validate: (output) => contract.validateOutput(dispatch.task, output),
+    validate: (output) =>
+      contract.validateOutput(dispatch.task, output) ?? OUTPUT_RULES[dispatch.task]?.(output) ?? null,
   });
 };
 
@@ -274,7 +290,7 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
     const identity = dispatch.branch === undefined ? undefined : botIdentity();
     if (typeof identity === "string") throw new RunFailure("setup_failed", identity);
     container = startContainer(buildImage(dispatch, factoryDir), target);
-    if (container.sh("setup", enrolment.setup).status !== 0) {
+    if (!NO_SETUP_TASKS.includes(dispatch.task) && container.sh("setup", enrolment.setup).status !== 0) {
       throw new RunFailure("setup_failed", "setup failed");
     }
     if (dispatch.branch !== undefined && identity && dispatch.triggered_by) {
