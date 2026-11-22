@@ -38,6 +38,11 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN handled_at TEXT;
     """,
+    # 3: when `factory cancel` asked for the run to be cancelled. The orchestrator
+    # acts on it in its next loop, if the run is still queued or dispatched.
+    """
+    ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
+    """,
 ]
 
 

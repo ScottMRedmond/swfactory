@@ -26,12 +26,17 @@ log = logging.getLogger(__name__)
 EXPLORE_LABEL = "agent:explore"
 
 
+# Per-task timeouts in minutes, for the whole job. They live here only and travel
+# in each dispatch; a run still running 15 minutes past its timeout is cancelled.
+DEFAULT_TIMEOUTS = {"explore": 20, "auto-tickets": 20, "implement": 45, "review": 45}
+
+
 @dataclass(frozen=True)
 class Settings:
     repos: list[str]
     poll_seconds: int = 60
     max_in_flight: int = 2
-    timeouts: dict[str, int] = field(default_factory=lambda: {"explore": 20})
+    timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
 
 
@@ -79,6 +84,33 @@ def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings
         github.remove_label(repo, issue["number"], EXPLORE_LABEL)
 
 
+def cancel_closed(conn: sqlite3.Connection, github: GitHub, runner: Runner, repo: str) -> None:
+    """Cancel the active rows of every issue or PR in `repo` a human has closed.
+
+    A row belongs to its ticket and, for runs on a PR, to the PR in its
+    dispatch. Queued rows are marked `cancelled`; dispatched runs are cancelled
+    on the runner too, and whatever they leave behind is discarded.
+    """
+    rows = conn.execute(
+        """SELECT * FROM runs WHERE repo = ? AND status IN ('queued', 'dispatched')
+           ORDER BY id""",
+        (repo,),
+    ).fetchall()
+    closed: dict[str, bool] = {}
+
+    def is_closed(number: str) -> bool:
+        if number not in closed:
+            closed[number] = github.get_issue(repo, int(number)).get("state") == "closed"
+        return closed[number]
+
+    for row in rows:
+        subjects = [row["ticket"], json.loads(row["dispatch"]).get("pr_number")]
+        subjects = [str(s) for s in subjects if s is not None and str(s).isdigit()]
+        if any(is_closed(s) for s in subjects):
+            log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"])
+            loop.cancel(conn, runner, row)
+
+
 def run_once(conn: sqlite3.Connection, github: GitHub, runner: Runner, settings: Settings) -> None:
     """One pass: poll every repo, tick the queue, act on finished runs.
 
@@ -87,6 +119,7 @@ def run_once(conn: sqlite3.Connection, github: GitHub, runner: Runner, settings:
     for repo in settings.repos:
         try:
             poll(conn, github, repo, settings)
+            cancel_closed(conn, github, runner, repo)
         except (GitHubError, OSError) as e:
             log.error("polling %s failed: %s", repo, e)
     loop.tick(conn, runner, limit=settings.max_in_flight)

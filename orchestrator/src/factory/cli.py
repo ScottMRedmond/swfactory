@@ -8,7 +8,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-from factory import db, serve
+from factory import cancel, db, serve
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
 
@@ -28,9 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     runs.add_argument("id", nargs="?", type=int)
     runs.add_argument("--limit", type=int, default=20, help=argparse.SUPPRESS)
     serve.add_parser(commands)
+    cancel.add_parser(commands)
     args = parser.parse_args(argv)
     if args.command == "serve":
         return serve.run(args)
+    if args.command == "cancel":
+        return cancel.run(args)
 
     try:
         conn = db.connect_readonly(args.db)
