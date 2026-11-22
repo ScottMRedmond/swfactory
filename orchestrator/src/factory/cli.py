@@ -10,7 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, cancel, db, doctor, enrolment, logs, serve, state, stats
+from factory import attempts, brakes, cancel, db, doctor, enrolment, logs, pause, serve, state, stats
+from factory.orchestrator import Settings
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
 DEFAULT_LOGS = Path.home() / ".factory" / "logs"
@@ -74,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
 
     serve.add_parser(commands)
     cancel.add_parser(commands)
+    pause.add_parser(commands)
     doctor.add_parser(commands)
     return parser
 
@@ -86,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return doctor.main(args)
     if args.command == "cancel":
         return cancel.run(args)
+    if args.command in ("pause", "resume"):
+        return pause.run(args)
     if args.command == "logs":
         return _logs(args)
 
@@ -139,8 +143,10 @@ def _usage_line(reading: state.UsageReading | None, now: datetime) -> str:
 
 def _status(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     now = datetime.now(UTC)
-    limits = brakes.Limits()
-    print(f"paused: {'yes' if state.is_paused(conn) else 'no'}")
+    limits = Settings().limits
+    paused = [why for why, on in [("factory pause", state.is_paused(conn)),
+                                   ("contract_mismatch", attempts.dispatch_paused(conn))] if on]
+    print(f"paused: {'yes (' + ', '.join(paused) + ')' if paused else 'no'}")
     print(_usage_line(state.latest_usage(conn), now))
     today = brakes.daily_count(conn, now)
     cap = " (cap reached)" if today >= limits.daily_cap else ""
@@ -155,7 +161,7 @@ def _status(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
               _ago(r["dispatched_at"], now)] for r in in_flight],
         )
 
-    held = brakes.queue_holds(conn, limits, now)
+    held = brakes.queue_holds(conn, limits, now, enrolment.held(conn))
     print(f"\nqueue: {f'{len(held)}, oldest first' if held else 'empty'}")
     if held:
         _table(

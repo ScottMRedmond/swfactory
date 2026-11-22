@@ -115,15 +115,19 @@ def tick(
     paused: bool = False,
     check: Check | None = None,
     prepare: Prepare | None = None,
+    gate: Callable[[datetime], int | None] | None = None,
 ) -> None:
     """Cancel what was asked, collect, then dispatch (unless `paused`). Queued
-    rows of the repos in `held` stay queued. Then, if the runner has been
-    unavailable for 30 minutes, that's a factory problem."""
+    rows of the repos in `held` stay queued. `gate`, asked after collecting,
+    says how many rows may be dispatched (None: none; see `factory.brakes`).
+    Then, if the runner has been unavailable for 30 minutes, that's a factory
+    problem."""
     now = now or datetime.now(UTC)
     cancel_requested(conn, runner, now=now)
     collect(conn, runner, now=now, check=check)
-    if not paused:
-        dispatch(conn, runner, limit=limit, held=held, now=now, prepare=prepare)
+    max_new = None if gate is None else gate(now)
+    if not paused and (gate is None or max_new is not None):
+        dispatch(conn, runner, limit=limit, held=held, now=now, prepare=prepare, max_new=max_new)
     _check_unavailable(conn, now)
 
 
@@ -320,6 +324,15 @@ def _finish(
         )
 
 
+def refused_until(conn: sqlite3.Connection, now: datetime) -> datetime | None:
+    """When dispatching resumes after the runner refused a run, if it hasn't yet."""
+    refused_at = db_state.runner_refused_at(conn)
+    if refused_at is None:
+        return None
+    until = datetime.fromisoformat(refused_at) + REFUSED_BACKOFF
+    return until if now < until else None
+
+
 def dispatch(
     conn: sqlite3.Connection,
     runner: Runner,
@@ -328,13 +341,17 @@ def dispatch(
     held: Collection[str] = (),
     now: datetime | None = None,
     prepare: Prepare | None = None,
+    max_new: int | None = None,
 ) -> None:
+    """Dispatch queued rows, oldest first, while fewer than `limit` are in
+    flight, skipping the repos in `held`, and at most `max_new` of them. Not
+    while backing off after a refusal (`refused_until`)."""
     now = now or datetime.now(UTC)
-    refused_at = db_state.runner_refused_at(conn)
-    if refused_at is not None and now < datetime.fromisoformat(refused_at) + REFUSED_BACKOFF:
+    if refused_until(conn, now) is not None:
         return
+    refused_at = db_state.runner_refused_at(conn)
     held = list(held)
-    while True:
+    while max_new is None or max_new > 0:
         in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
         if in_flight >= limit:
             return
@@ -347,6 +364,8 @@ def dispatch(
             return
         try:
             dispatch_run(conn, runner, row, prepare)
+            if max_new is not None:
+                max_new -= 1
         except TryLater as e:
             log.warning("run %s can't be prepared, stays queued: %s", row["id"], e,
                         extra=_about(row))

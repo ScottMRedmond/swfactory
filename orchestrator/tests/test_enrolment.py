@@ -11,6 +11,7 @@ from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
 from factory import cli, db, enrolment, loop, orchestrator
 from factory.contract import parse_dispatch
+from factory.brakes import Limits
 from factory.github import AppAuth, GitHub, Response
 from factory.runner import FakeRunner, RunFiles
 
@@ -228,7 +229,7 @@ def busy(conn, fake, github, runner, settings):
     repo.add_issue(1, "T", labels=["agent:explore"])
     repo.add_issue(2, "T", labels=["agent:explore"])
     enrolment.refresh(conn, github, factory_repo=FACTORY_REPO)
-    orchestrator.run_once(conn, github, FakeRunner(), orchestrator.Settings(max_in_flight=0))
+    orchestrator.run_once(conn, github, FakeRunner(), orchestrator.Settings(limits=Limits(max_in_flight=0)))
     loop.tick(conn, runner, limit=1)
     conn.execute("""INSERT INTO workflows (repo, kind, subject, status)
                     VALUES ('octo/widgets', 'implement-ticket', '9', 'done')""")

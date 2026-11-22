@@ -10,6 +10,7 @@ import pytest
 from fake_github import APP_ID, APP_LOGIN, PRIVATE_KEY, FakeGitHub
 
 from factory import db, enrolment, loop, orchestrator, state
+from factory.brakes import Limits
 from factory.github import AppAuth, GitHub, Response
 from factory.runner import FakeRunner, RunFiles
 from factory.workflows import base
@@ -102,7 +103,7 @@ def test_queuing_the_first_run_creates_the_status_comment(conn, github, repo, ru
     issue = ticket(repo)
     fresh_usage(conn)
 
-    orchestrator.run_once(conn, github, runner, orchestrator.Settings(max_in_flight=0))
+    orchestrator.run_once(conn, github, runner, orchestrator.Settings(limits=Limits(max_in_flight=0)))
 
     run = only_run(conn)
     assert status(issue).startswith(MARK)
@@ -193,7 +194,7 @@ def test_a_held_back_run_says_why(conn, github, repo, runner, brake, why):
     fresh_usage(conn)
     brake(conn)
 
-    orchestrator.run_once(conn, github, runner, orchestrator.Settings(max_in_flight=0))
+    orchestrator.run_once(conn, github, runner, orchestrator.Settings(limits=Limits(max_in_flight=0)))
 
     [line] = run_lines(issue)
     assert line.startswith(f"- `explore` 1/2: queued: {why}")

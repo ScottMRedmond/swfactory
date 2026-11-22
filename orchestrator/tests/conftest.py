@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from factory import cli, db, loop
+from factory import cli, db, loop, usage
 from factory.runner import FakeRunner, RunFiles
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "contracts" / "examples"
@@ -66,6 +66,19 @@ class World:
         code = cli.main(["--db", str(self.path), *args])
         out, err = self._capsys.readouterr()
         return code, out, err
+
+
+LOW_USAGE = [
+    {"kind": "session", "percent": 1, "resets_at": "2099-01-01T00:00:00+00:00"},
+    {"kind": "weekly_all", "percent": 1, "resets_at": "2099-01-01T00:00:00+00:00"},
+]
+
+
+@pytest.fixture(autouse=True)
+def low_usage(monkeypatch):
+    """Never run the real `claude`: every test reads low usage unless it sets
+    `usage.READ` itself (see test_brakes.py)."""
+    monkeypatch.setattr(usage, "READ", lambda: (LOW_USAGE, None))
 
 
 @pytest.fixture

@@ -9,6 +9,7 @@ import pytest
 from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
 from factory import db, enrolment, loop, orchestrator, state
+from factory.brakes import Limits
 from factory.contract import parse_dispatch
 from factory.github import AppAuth, GitHub
 from factory.runner import FakeRunner, RunFiles
@@ -381,7 +382,7 @@ def test_while_the_runner_is_unavailable_rows_stay_as_they_are_and_no_attempt_is
 ):
     ticket(repo)
     ticket(repo, number=8)
-    orchestrator.run_once(conn, github, runner, orchestrator.Settings(max_in_flight=1))
+    orchestrator.run_once(conn, github, runner, orchestrator.Settings(limits=Limits(max_in_flight=1)))
     before = [(r["id"], r["status"], r["attempt"]) for r in runs(conn)]
     assert [s for _, s, _ in before] == ["dispatched", "queued"]
 
