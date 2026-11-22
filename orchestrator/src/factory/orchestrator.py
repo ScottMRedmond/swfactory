@@ -2,9 +2,10 @@
 
 `run_once` is one pass of the main loop: poll each repo for trigger labels,
 `loop.tick` the queue (collect, then dispatch), then act on finished runs.
-`serve` runs it about every 60 seconds.
+`serve` runs it about every 60 seconds, and re-reads the enrolments (which
+repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Today only `agent:explore` is handled, on repos named in `Settings.repos`.
+Today only `agent:explore` is handled.
 """
 
 import json
@@ -16,8 +17,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from factory import enrolment as enrolments
 from factory import loop
 from factory.contract import CONTRACT_VERSION
+from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
 from factory.runner import Runner
 
@@ -28,11 +31,23 @@ EXPLORE_LABEL = "agent:explore"
 
 @dataclass(frozen=True)
 class Settings:
-    repos: list[str]
+    """The global config. An enrolment's `timeouts` and `models` override the
+    per-task defaults for its repo; the rest stays global."""
+
+    # The factory's own repo, whose main holds factory-config.yml (`owner`).
+    factory_repo: str = "ScottMRedmond/swfactory"
     poll_seconds: int = 60
+    refresh_seconds: int = 600  # how often installations and enrolments are re-read
     max_in_flight: int = 2
-    timeouts: dict[str, int] = field(default_factory=lambda: {"explore": 20})
+    timeouts: dict[str, int] = field(default_factory=lambda: {
+        "explore": 20, "auto-tickets": 20, "implement": 45, "review": 45})
     models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
+
+    def timeout(self, task: str, enrolment: Enrolment) -> int:
+        return enrolment.config.timeouts.get(task, self.timeouts[task])
+
+    def model(self, task: str, enrolment: Enrolment) -> str:
+        return enrolment.config.models.get(task, self.models[task])
 
 
 def render_ticket(issue: dict[str, Any]) -> str:
@@ -50,7 +65,14 @@ def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings
     The row is inserted first, then the label removed, so a crash between the
     two leaves a duplicate trigger rather than a lost one. A ticket that
     already has a queued or dispatched explore isn't queued again.
+
+    Only an enrolled repo is polled. The first poll of a repo creates the
+    factory labels it lacks.
     """
+    enrolment = enrolments.get(conn, repo)
+    if enrolment is None:
+        raise LookupError(f"{repo} isn't enrolled")
+    enrolments.ensure_labels(conn, github, repo)
     for issue in github.open_issues_with_label(repo, EXPLORE_LABEL):
         if "pull_request" in issue:
             continue
@@ -70,9 +92,9 @@ def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings
                     "ticket_markdown": render_ticket(issue),
                     "older_issues": [],
                     "base_sha": head,
-                    "enrolment_sha": head,
-                    "model": settings.models["explore"],
-                    "timeout_minutes": settings.timeouts["explore"],
+                    "enrolment_sha": enrolment.sha,
+                    "model": settings.model("explore", enrolment),
+                    "timeout_minutes": settings.timeout("explore", enrolment),
                 },
             )
             log.info("queued explore run %s for %s#%s", run_id, repo, ticket)
@@ -80,16 +102,17 @@ def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings
 
 
 def run_once(conn: sqlite3.Connection, github: GitHub, runner: Runner, settings: Settings) -> None:
-    """One pass: poll every repo, tick the queue, act on finished runs.
+    """One pass: poll every enrolled repo, tick the queue, act on finished runs.
 
     A repo whose calls fail is logged and skipped; the others carry on.
+    Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
     """
-    for repo in settings.repos:
+    for enrolment in enrolments.polled(conn):
         try:
-            poll(conn, github, repo, settings)
+            poll(conn, github, enrolment.repo, settings)
         except (GitHubError, OSError) as e:
-            log.error("polling %s failed: %s", repo, e)
-    loop.tick(conn, runner, limit=settings.max_in_flight)
+            log.error("polling %s failed: %s", enrolment.repo, e)
+    loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn))
     handle_finished(conn, github, runner)
 
 
@@ -155,10 +178,25 @@ def serve(
     settings: Settings,
     *,
     sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Run `run_once` about every `poll_seconds`, until interrupted."""
-    log.info("serving %s, polling every %ss", ", ".join(settings.repos), settings.poll_seconds)
+    """Run `run_once` about every `poll_seconds`, until interrupted.
+
+    Enrolments (and the factory's `owner`) are re-read at the start and then
+    every `refresh_seconds`. A failed refresh is logged, the last known
+    enrolments are used, and it's tried again on the next pass.
+    """
+    log.info("serving, polling every %ss", settings.poll_seconds)
+    refreshed_at: float | None = None
     while True:
+        if refreshed_at is None or clock() - refreshed_at >= settings.refresh_seconds:
+            try:
+                owner = enrolments.refresh(conn, github, factory_repo=settings.factory_repo)
+                refreshed_at = clock()
+                log.info("enrolments refreshed: polling %s; owner %s",
+                         ", ".join(e.repo for e in enrolments.polled(conn)) or "no repos", owner)
+            except Exception:
+                log.exception("refreshing the enrolments failed; trying again next pass")
         try:
             run_once(conn, github, runner, settings)
         except Exception:

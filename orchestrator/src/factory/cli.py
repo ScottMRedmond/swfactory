@@ -8,7 +8,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-from factory import db, serve
+from factory import db, serve, status
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
 
@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     runs.add_argument("id", nargs="?", type=int)
     runs.add_argument("--limit", type=int, default=20, help=argparse.SUPPRESS)
     serve.add_parser(commands)
+    status.add_parser(commands)
     args = parser.parse_args(argv)
     if args.command == "serve":
         return serve.run(args)
@@ -38,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"factory: can't open {args.db}: {e}", file=sys.stderr)
         return 1
     with closing(conn):
+        if args.command == "status":
+            return status.run(conn)
         if args.id is None:
             return _list_runs(conn, args.limit)
         return _show_run(conn, args.id)

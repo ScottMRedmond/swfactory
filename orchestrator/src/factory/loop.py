@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import sqlite3
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -73,9 +74,12 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
 
 
-def tick(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
+def tick(
+    conn: sqlite3.Connection, runner: Runner, *, limit: int, held: Collection[str] = ()
+) -> None:
+    """Collect, then dispatch. Queued rows of the repos in `held` stay queued."""
     collect(conn, runner)
-    dispatch(conn, runner, limit=limit)
+    dispatch(conn, runner, limit=limit, held=held)
 
 
 def collect(conn: sqlite3.Connection, runner: Runner) -> None:
@@ -127,13 +131,18 @@ def _finish(conn: sqlite3.Connection, run_id: int, outcome: str, result: str | N
         )
 
 
-def dispatch(conn: sqlite3.Connection, runner: Runner, *, limit: int) -> None:
+def dispatch(
+    conn: sqlite3.Connection, runner: Runner, *, limit: int, held: Collection[str] = ()
+) -> None:
+    held = list(held)
     while True:
         in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
         if in_flight >= limit:
             return
         row = conn.execute(
-            "SELECT * FROM runs WHERE status = 'queued' ORDER BY id LIMIT 1"
+            f"""SELECT * FROM runs WHERE status = 'queued'
+                AND repo NOT IN ({", ".join("?" * len(held))}) ORDER BY id LIMIT 1""",
+            held,
         ).fetchone()
         if row is None:
             return

@@ -8,9 +8,11 @@ scoped to that repo. Every request is recorded in `.requests`.
     gh = FakeGitHub(clock=clock)
     repo = gh.add_repo("octo/widgets")
     repo.add_issue(7, "Title", "Body", labels=["agent:explore"])
+    repo.files[".factory/config.yml"] = "setup: uv sync\ncheck: pytest\n"
     client = GitHub(AppAuth(APP_ID, PRIVATE_KEY, gh, clock=clock), gh)
 """
 
+import base64
 import itertools
 import json
 import re
@@ -69,6 +71,11 @@ class Repo:
     default_branch: str = "main"
     head_sha: str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     issues: dict[int, Issue] = field(default_factory=dict)
+    # Files on the default branch's head, by path.
+    files: dict[str, str] = field(default_factory=dict)
+    # Labels by name: {"name", "color", "description"}.
+    labels: dict[str, dict[str, str]] = field(default_factory=dict)
+    installed: bool = True
 
     def add_issue(self, number, title, body="", labels=(), **kw) -> Issue:
         issue = Issue(number, title, body, list(labels), **kw)
@@ -90,6 +97,16 @@ class FakeGitHub:
         self.repos[full_name] = repo
         return repo
 
+    def uninstall(self, full_name: str) -> None:
+        """The App is removed from the repo: GitHub no longer lists or serves it."""
+        self.repos[full_name].installed = False
+        for token in self.tokens.values():
+            if full_name in token["repos"]:
+                token["repos"].remove(full_name)
+
+    def _installed(self) -> list[Repo]:
+        return [r for r in self.repos.values() if r.installed]
+
     # --- the transport -------------------------------------------------------
 
     def __call__(self, request: Request) -> Response:
@@ -109,6 +126,8 @@ class FakeGitHub:
                 args = [unquote(a) for a in m.groups()]
                 if auth == "jwt":
                     error = self._check_jwt(request)
+                elif auth == "installation":
+                    error, args = self._check_installation_token(request)
                 else:
                     error = self._check_token(request, f"{args[0]}/{args[1]}")
                 if error:
@@ -119,6 +138,8 @@ class FakeGitHub:
     def _routes(self):
         repo = r"/repos/([^/]+)/([^/]+)"
         return [
+            ("GET", r"/app/installations", self._installations, "jwt"),
+            ("GET", r"/installation/repositories", self._installation_repos, "installation"),
             ("GET", repo + "/installation", self._installation, "jwt"),
             ("POST", r"/app/installations/(\d+)/access_tokens", self._access_token, "jwt"),
             ("GET", repo, self._repo, "token"),
@@ -127,6 +148,9 @@ class FakeGitHub:
             ("GET", repo + r"/issues/(\d+)", self._get_issue, "token"),
             ("DELETE", repo + r"/issues/(\d+)/labels/(.+)", self._remove_label, "token"),
             ("POST", repo + r"/issues/(\d+)/comments", self._comment, "token"),
+            ("GET", repo + r"/contents/(.+)", self._contents, "token"),
+            ("GET", repo + "/labels", self._list_labels, "token"),
+            ("POST", repo + "/labels", self._create_label, "token"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -158,22 +182,47 @@ class FakeGitHub:
             return _json(404, {"message": "Not Found"})
         return None
 
+    def _check_installation_token(self, request: Request):
+        auth = request.headers.get("Authorization", "")
+        token = self.tokens.get(auth.removeprefix("Bearer "))
+        if token is None or token["expires"] <= self.clock():
+            return _json(401, {"message": "Bad credentials"}), []
+        return None, [token]
+
     # --- handlers -------------------------------------------------------------
+
+    def _installations(self, *, query, body):
+        installed = self._installed()
+        ids = sorted({r.installation_id for r in installed})
+        data = [
+            {"id": i, "account": {"login": next(r.full_name.split("/")[0] for r in installed
+                                                if r.installation_id == i)}}
+            for i in ids
+        ]
+        return _paged(query, data, "https://api.github.com/app/installations")
+
+    def _installation_repos(self, token, *, query, body):
+        repos = [self.repos[n] for n in sorted(token["repos"]) if self.repos[n].installed]
+        page = _paged(query, [{"full_name": r.full_name, "default_branch": r.default_branch}
+                              for r in repos], "https://api.github.com/installation/repositories")
+        return _json(page.status, {"total_count": len(repos), "repositories": page.json()},
+                     page.headers)
 
     def _installation(self, owner, name, *, query, body):
         repo = self.repos.get(f"{owner}/{name}")
-        if repo is None:
+        if repo is None or not repo.installed:
             return _json(404, {"message": "Not Found"})
         return _json(200, {"id": repo.installation_id, "account": {"login": owner}})
 
     def _access_token(self, installation_id, *, query, body):
-        installed = [r for r in self.repos.values() if r.installation_id == int(installation_id)]
+        installed = [r for r in self._installed() if r.installation_id == int(installation_id)]
         owner = installed[0].full_name.split("/")[0]
         names = (body or {}).get("repositories")
         repos = [r.full_name for r in installed if names is None or r.full_name.split("/")[1] in names]
         token = f"ghs_fake{next(self._ids):04d}{'x' * 28}"
         expires = self.clock() + TOKEN_LIFETIME
-        self.tokens[token] = {"repos": repos, "expires": expires, "owner": owner}
+        self.tokens[token] = {"repos": repos, "expires": expires, "owner": owner,
+                              "permissions": (body or {}).get("permissions")}
         return _json(
             201,
             {
@@ -231,6 +280,40 @@ class FakeGitHub:
         comment = {"id": next(self._ids), "body": body["body"], "user": {"login": "factory[bot]"}}
         issue.comments.append(comment)
         return _json(201, comment)
+
+
+    def _contents(self, owner, name, path, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        ref = query.get("ref", repo.default_branch)
+        text = repo.files.get(path)
+        if ref not in (repo.default_branch, repo.head_sha) or text is None:
+            return _json(404, {"message": "Not Found"})
+        return _json(200, {"type": "file", "path": path, "encoding": "base64",
+                           "content": base64.encodebytes(text.encode()).decode()})
+
+    def _list_labels(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        return _paged(query, list(repo.labels.values()),
+                      f"https://api.github.com/repos/{owner}/{name}/labels")
+
+    def _create_label(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        if body["name"] in repo.labels:
+            return _json(422, {"message": "Validation Failed",
+                               "errors": [{"resource": "Label", "code": "already_exists"}]})
+        repo.labels[body["name"]] = {"name": body["name"], "color": body.get("color", "ededed"),
+                                     "description": body.get("description", "")}
+        return _json(201, repo.labels[body["name"]])
+
+
+def _paged(query: dict[str, str], items: list[Any], base: str) -> Response:
+    per_page = int(query.get("per_page", 30))
+    page = int(query.get("page", 1))
+    headers = {}
+    if page * per_page < len(items):
+        nxt = base + "?" + "&".join(f"{k}={v}" for k, v in {**query, "page": page + 1}.items())
+        headers["Link"] = f'<{nxt}>; rel="next"'
+    return _json(200, items[(page - 1) * per_page : page * per_page], headers)
 
 
 def _json(status: int, data: Any, headers: dict[str, str] | None = None) -> Response:
