@@ -8,7 +8,7 @@ than to one run; `status` is `active`, `done`, `stopped` or `cancelled`.
 
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from factory.github import GitHub
 from factory.runner import Runner
@@ -37,6 +37,13 @@ class Workflow(Protocol):
     def on_result(self, ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
         """Act on a done run of this workflow: post, label, queue the next task.
         Raises `GitHubError` or `OSError` to be called again on the next pass."""
+        ...
+
+    def prepare(
+        self, ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row
+    ) -> dict[str, Any] | None:
+        """The dispatch to send for queued `run`, freshened just before it goes
+        out, or None to send it as queued."""
         ...
 
 
