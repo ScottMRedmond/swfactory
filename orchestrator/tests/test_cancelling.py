@@ -11,7 +11,7 @@ from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
 
 from factory import cli, db, loop, orchestrator
 from factory.github import AppAuth, GitHub
-from factory.runner import FakeRunner, RunFiles
+from factory.runner import FakeRunner, RunFiles, RunnerUnavailable
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "contracts" / "examples"
 SMOKE_DISPATCH = json.loads((EXAMPLES / "dispatch" / "smoke.valid.json").read_text())
@@ -297,3 +297,36 @@ def test_cancel_doesnt_create_a_missing_database(tmp_path, capsys):
 
     assert code == 1
     assert not path.exists()
+
+
+class FlakyCancel(FakeRunner):
+    down = True
+
+    def cancel(self, repo, runner_run_id):
+        if self.down:
+            raise RunnerUnavailable("runner down")
+        super().cancel(repo, runner_run_id)
+
+
+def test_a_cancel_the_runner_cant_take_yet_is_tried_again_next_loop(conn, path, capsys):
+    runner = FlakyCancel()
+    run_id = enqueue(conn)
+    loop.tick(conn, runner, limit=2)
+    run_cli(capsys, path, "cancel", str(run_id))
+
+    loop.tick(conn, runner, limit=2)
+    assert row(conn, run_id)["status"] == "dispatched"
+
+    runner.down = False
+    loop.tick(conn, runner, limit=2)
+    assert row(conn, run_id)["outcome"] == "cancelled"
+
+
+def test_a_timeout_cancel_the_runner_cant_take_yet_leaves_the_run_dispatched(conn):
+    runner = FlakyCancel()
+    run_id = enqueue(conn, timeout_minutes=20)
+    loop.tick(conn, runner, limit=2)
+
+    loop.tick(conn, runner, limit=2, now=dispatched_at(conn, run_id) + timedelta(hours=1))
+
+    assert row(conn, run_id)["status"] == "dispatched"
