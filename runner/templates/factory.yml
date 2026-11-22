@@ -1,0 +1,20 @@
+# The factory's caller workflow. Copy it to .github/workflows/factory.yml in
+# an enrolled repo; the orchestrator dispatches it with one JSON input. The
+# run happens in that repo, through the factory's run.yml. See "Enrolling a
+# repo" in docs/software-factory.md.
+run-name: "Factory run ${{ fromJSON(inputs.dispatch).run_id }}: ${{ fromJSON(inputs.dispatch).task }}"
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch:
+        description: The dispatch, one JSON object (contracts/dispatch.schema.json)
+        required: true
+permissions:
+  contents: read
+jobs:
+  run:
+    uses: ScottMRedmond/swfactory/.github/workflows/run.yml@main
+    with:
+      dispatch: ${{ inputs.dispatch }}
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
