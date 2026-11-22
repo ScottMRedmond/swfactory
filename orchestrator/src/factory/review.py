@@ -2,7 +2,8 @@
 (orchestrator.md#review), whichever workflow (or none) the PR belongs to.
 
 - `against` decides what a PR is reviewed against: the ticket of the factory
-  workflow that opened it, else the issues it closes, else nothing (`no-ticket`).
+  workflow that opened it (a spec PR: the spec and its built tickets), else
+  the issues it closes, else nothing (`no-ticket`).
 - `render_input` makes review's `ticket.md`: the PR, what it's reviewed
   against, and the PR's comments filtered as for tickets.
 - `publish` posts a result: the findings on a changed line inline, as one
@@ -37,16 +38,29 @@ INSTRUCTIONS_CHANGED = ("⚠️ This PR changes agent instructions (`CLAUDE.md`,
 
 def against(conn: sqlite3.Connection, github: GitHub, repo: str, pr: int) -> list[int]:
     """The issues PR `pr` is reviewed against. A PR the factory opened for a
-    ticket is reviewed against that ticket, from the factory's own state;
-    any other against the issues it closes. Empty means `no-ticket`."""
+    ticket is reviewed against that ticket, from the factory's own state; a
+    spec PR against the spec and every open ticket of it built on the
+    integration branch (one closed by hand isn't); any other against the
+    issues it closes. Empty means `no-ticket`."""
     row = conn.execute(
-        "SELECT subject FROM workflows WHERE repo = ? AND kind = 'implement-ticket' AND pr = ? "
-        "ORDER BY id DESC LIMIT 1",
+        "SELECT kind, subject FROM workflows WHERE repo = ? "
+        "AND kind IN ('implement-ticket', 'implement-spec') AND pr = ? ORDER BY id DESC LIMIT 1",
         (repo, pr),
     ).fetchone()
+    if row is not None and row["kind"] == "implement-spec":
+        spec = int(row["subject"])
+        built = sorted(i["number"] for i in github.issues_with_label(repo, f"spec:{spec}")
+                       if "pull_request" not in i and i["state"] == "open"
+                       and "agent:built" in _labels(i))
+        return [spec, *built]
     if row is not None:
         return [int(row["subject"])]
     return github.closing_issues(repo, pr)
+
+
+def _labels(issue: dict[str, Any]) -> list[str]:
+    return [label["name"] if isinstance(label, dict) else label
+            for label in issue.get("labels", [])]
 
 
 def render_input(
