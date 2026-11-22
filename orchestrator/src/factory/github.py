@@ -245,6 +245,7 @@ class GitHub:
         self._transport = transport
         self._git_url = git_url
         self._app_login: str | None = None
+        self._bot_identity: tuple[str, str] | None = None
 
     def __repr__(self) -> str:
         return f"GitHub({self._auth!r})"
@@ -299,6 +300,17 @@ class GitHub:
         if self._app_login is None:
             self._app_login = f"{self._auth.app()['slug']}[bot]"
         return self._app_login
+
+    def bot_identity(self, repo: str) -> tuple[str, str]:
+        """The git identity (name, email) the App's commits use: its bot login
+        and `<bot user id>+<login>@users.noreply.github.com`, as in run.yml's
+        FACTORY_BOT_EMAIL. The id is read once, with `repo`'s token."""
+        if self._bot_identity is None:
+            login = self.app_login()
+            user = _send(self._transport, self._auth.token(repo), "GET",
+                         f"{API}/users/{quote(login, safe='')}").json()
+            self._bot_identity = (login, f"{user['id']}+{login}@users.noreply.github.com")
+        return self._bot_identity
 
     def open_issues_with_label(self, repo: str, label: str) -> list[dict[str, Any]]:
         """Open issues and PRs carrying `label` (a PR has a `pull_request` key)."""

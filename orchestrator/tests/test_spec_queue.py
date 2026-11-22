@@ -8,7 +8,7 @@ runs go through the fake runner."""
 import json
 from dataclasses import replace
 
-from fake_github import user_id
+from fake_github import APP_LOGIN, user_id
 from git_repos import git
 
 from factory import loop, orchestrator
@@ -199,6 +199,9 @@ def test_a_clean_merge_after_a_human_pushed_lands_as_a_merge_commit(
     assert git(remote.path, "show", f"{head}:src/saved.py") == "store()"
     assert git(remote.path, "show", f"{head}:docs/notes.md") == "a human's notes"
     assert "agent:built" in first.labels
+    bot = f"{user_id(APP_LOGIN)}+{APP_LOGIN}@users.noreply.github.com"
+    assert git(remote.path, "log", "-1", "--format=%an <%ae>|%cn <%ce>", head) == (
+        f"{APP_LOGIN} <{bot}>|{APP_LOGIN} <{bot}>")
 
 
 def test_a_conflict_discards_the_commits_and_builds_the_ticket_again_on_the_new_head(

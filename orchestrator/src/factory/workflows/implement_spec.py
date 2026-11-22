@@ -306,13 +306,12 @@ def _land(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[st
     store = _store(ctx)
     checked = implement_ticket.checked_bundle(ctx, store, run, dispatch["base_sha"])
     assert checked is not None  # built always has commits
-    app = ctx.github.app_login()
     issue = ctx.github.get_issue(repo, number)
     try:
         head = store.land(repo, run["id"], branch,
                           message=f"Merge #{number} ({issue['title']}) into {branch}\n\n"
                                   f"Factory run {run['id']}",
-                          identity=(app, f"{app}@users.noreply.github.com"))
+                          identity=ctx.github.bot_identity(repo))
     except bundles.Conflict:
         _conflicted(ctx, run, workflow)
         return
