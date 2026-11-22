@@ -10,7 +10,7 @@ from typing import Any
 
 from factory import attempts
 from factory.workflows import base
-from factory.workflows import implement_spec, implement_ticket
+from factory.workflows import implement_spec, implement_ticket, review_pr
 from factory.workflows.base import Context, Workflow
 
 __all__ = ["BY_KIND", "Context", "Workflow", "on_result", "prepare"]
@@ -18,6 +18,7 @@ __all__ = ["BY_KIND", "Context", "Workflow", "on_result", "prepare"]
 BY_KIND: dict[str, Workflow] = {  # type: ignore[dict-item]
     implement_ticket.KIND: implement_ticket,
     implement_spec.KIND: implement_spec,
+    review_pr.KIND: review_pr,
 }
 
 

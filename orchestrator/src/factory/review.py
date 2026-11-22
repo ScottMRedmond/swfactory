@@ -5,13 +5,17 @@
   workflow that opened it, else the issues it closes, else nothing (`no-ticket`).
 - `render_input` makes review's `ticket.md`: the PR, what it's reviewed
   against, and the PR's comments filtered as for tickets.
+- `publish` posts a result: the findings on a changed line inline, as one
+  `COMMENT` review (`post_findings`), then the verdict comment with the rest.
 - `render_verdict` is the one verdict comment; `post_verdict` posts it (once)
   and minimizes the previous one as outdated; `finish` marks the PR ready,
   labels it and asks its human to review it.
+- `is_fork` tells a fork PR, which is never reviewed.
 """
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import replace
 from typing import Any
@@ -23,6 +27,10 @@ log = logging.getLogger(__name__)
 
 MARK = "<!-- factory:review run={} -->"
 _MARK_PREFIX = "<!-- factory:review run="
+FINDINGS_MARK = "<!-- factory:review-findings run={} -->"
+# At most this many findings go inline (the output's `maxItems`); the rest go
+# into the verdict comment.
+MAX_INLINE = 25
 INSTRUCTIONS_CHANGED = ("⚠️ This PR changes agent instructions (`CLAUDE.md`, `AGENTS.md` or "
                         "`.claude/`); it was reviewed against the base's.")
 
@@ -59,15 +67,107 @@ def render_input(
                    body="\n\n".join(p for p in parts if p), history=[])
 
 
+def is_fork(pull: dict[str, Any], repo: str) -> bool:
+    """Whether PR `pull` (as `GitHub.pull` gives it) comes from another repo
+    than `repo`. A deleted fork's head has no repo at all."""
+    head_repo = (pull.get("head") or {}).get("repo")
+    return head_repo is None or str(head_repo.get("full_name", "")).lower() != repo.lower()
+
+
+def changed_lines(patch: str | None) -> set[int]:
+    """The new-side line numbers a file's patch adds (not its context lines)."""
+    lines: set[int] = set()
+    n = 0
+    for text in (patch or "").splitlines():
+        hunk = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", text)
+        if hunk:
+            n = int(hunk.group(1))
+        elif text.startswith("+"):
+            lines.add(n)
+            n += 1
+        elif text.startswith(" "):
+            n += 1
+    return lines
+
+
+def place(
+    comments: list[dict[str, Any]], files: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split findings into those that go inline (on a changed line of the PR's
+    diff, the first `MAX_INLINE`) and the rest, each in their order."""
+    changed = {f["filename"]: changed_lines(f.get("patch")) for f in files}
+    inline: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for c in comments:
+        on_diff = c["line"] in changed.get(c["path"], set())
+        (inline if on_diff and len(inline) < MAX_INLINE else rest).append(c)
+    return inline, rest
+
+
+def post_findings(
+    github: GitHub, repo: str, pr: int, run_id: int, comments: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Post run `run_id`'s findings that are on a changed line of PR `pr` as
+    one `COMMENT` review, once. Returns the findings left for the verdict
+    comment: all of them if GitHub rejects the review, since a misplaced
+    finding never fails the run."""
+    if not comments:
+        return []
+    pull = github.pull(repo, pr)
+    inline, rest = place(comments, github.pull_files(repo, pr))
+    if not inline:
+        return rest
+    mark = FINDINGS_MARK.format(run_id)
+    app = github.app_login()
+    if any(r["user"]["login"] == app and (r.get("body") or "").startswith(mark)
+           for r in github.reviews(repo, pr)):
+        return rest  # posted before a crash
+    body = (f"{mark}\nReview's findings on the diff, from factory run {run_id}. "
+            "The verdict is in the PR's comments.")
+    posted = github.comment_review(
+        repo, pr, body=body, commit_id=(pull.get("head") or {}).get("sha"),
+        comments=[{"path": c["path"], "line": c["line"], "side": "RIGHT", "body": _inline(c)}
+                  for c in inline])
+    if not posted:
+        log.warning("GitHub refused run %s's inline findings on %s#%s; they go in the verdict",
+                    run_id, repo, pr, extra={"repo": repo, "ticket": str(pr)})
+        return comments
+    return rest
+
+
+def _inline(c: dict[str, Any]) -> str:
+    axis = "Standards" if c["axis"] == "standards" else "Spec"
+    return f"**{c['title'].strip()}** ({axis})\n\n{c['body'].strip()}"
+
+
+def publish(
+    github: GitHub, repo: str, pr: int, run_id: int, result: dict[str, Any], log_link: str,
+    *, discarded: bool = False,
+) -> None:
+    """Post a review's result on PR `pr`: its findings on changed lines
+    inline, then the verdict comment with the rest. Called after any fixes
+    are pushed, so the findings are checked against the diff as it is."""
+    comments = result["output"]["comments"]
+    rest = post_findings(github, repo, pr, run_id, comments)
+    post_verdict(github, repo, pr, run_id, render_verdict(
+        run_id, result, log_link, discarded=discarded, findings=rest,
+        inline=len(comments) - len(rest)))
+
+
 def render_verdict(
     run_id: int, result: dict[str, Any], log_link: str, *, discarded: bool = False,
-    notes: list[str] | None = None,
+    notes: list[str] | None = None, findings: list[dict[str, Any]] | None = None,
+    inline: int = 0,
 ) -> str:
     """The verdict comment: the check-failed preamble when the check failed
     before the agent ran, the orchestrator's own lines, then a `Standards`
     and a `Spec` section (verdict, reasoning, unfixed findings), `Fixed` and
-    `Missing rules`. `discarded` says the fixes failed the check and weren't pushed."""
+    `Missing rules`. `discarded` says the fixes failed the check and weren't
+    pushed. `findings` are the unfixed findings to list (all, by default);
+    `inline` says how many were posted inline instead."""
     output = result["output"]
+    if findings is None:
+        findings = output["comments"]
     parts = [f"{MARK.format(run_id)}\n## Review\n"]
     before = result.get("check_before")
     if before is not None and not before["passed"]:
@@ -81,12 +181,14 @@ def render_verdict(
     if result.get("instructions_changed"):
         parts.append(INSTRUCTIONS_CHANGED + "\n")
     parts.extend(f"{note}\n" for note in notes or [])
+    if inline:
+        parts.append(f"{inline} finding{' is' if inline == 1 else 's are'} inline on the diff.\n")
     for axis, heading in (("standards", "Standards"), ("spec", "Spec")):
         parts.append(f"### {heading}: `{output[axis]['verdict']}`\n\n"
                      f"{output[axis]['reasoning'].strip()}\n")
-        findings = [c for c in output["comments"] if c["axis"] == axis]
-        if findings:
-            parts.append("\n".join(_finding(c) for c in findings) + "\n")
+        listed = [c for c in findings if c["axis"] == axis]
+        if listed:
+            parts.append("\n".join(_finding(c) for c in listed) + "\n")
     fixed = output["fixed"]
     heading = "Fixed (discarded)" if discarded else "Fixed"
     parts.append(f"### {heading}\n\n" + ("\n".join(f"- {f}" for f in fixed) if fixed

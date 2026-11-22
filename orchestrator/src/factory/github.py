@@ -427,6 +427,33 @@ class GitHub:
         """A PR as the pulls API gives it (`node_id`, `draft`, `head`, `base`, ...)."""
         return self._call(repo, "GET", f"/pulls/{number}").json()
 
+    def pull_files(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """The files PR `number` changes, each with its `patch` (absent for a
+        binary or very large file)."""
+        return list(self._each(repo, f"/pulls/{number}/files"))
+
+    def reviews(self, repo: str, number: int) -> list[dict[str, Any]]:
+        """The reviews posted on PR `number`."""
+        return list(self._each(repo, f"/pulls/{number}/reviews"))
+
+    def comment_review(
+        self, repo: str, number: int, *, body: str, comments: list[dict[str, Any]],
+        commit_id: str | None = None,
+    ) -> bool:
+        """Post one review with the `COMMENT` event (never approving or asking
+        for changes) holding inline `comments` ({path, line, side, body}).
+        False if GitHub rejects it (422: e.g. a comment isn't on the diff)."""
+        review: dict[str, Any] = {"event": "COMMENT", "body": body, "comments": comments}
+        if commit_id:
+            review["commit_id"] = commit_id
+        try:
+            self._call(repo, "POST", f"/pulls/{number}/reviews", review)
+        except GitHubError as e:
+            if e.status != 422:
+                raise
+            return False
+        return True
+
     def request_review(self, repo: str, number: int, login: str) -> bool:
         """Ask `login` to review PR `number`. False if GitHub won't (422: e.g.
         they're not a collaborator, or they opened it)."""

@@ -135,8 +135,12 @@ class Repo:
     # Active ruleset rules by fnmatch branch pattern, e.g. {"factory/*": [{"type": "creation"}]}.
     rules: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # PRs by number: {"number", "title", "head", "base", "body", "draft", "state",
-    # "closes" (issue numbers: its closing references), "requested_reviewers" (logins)}. Each
-    # is also in `issues` (with pull_request=True), sharing the issue numbers like on GitHub.
+    # "closes" (issue numbers: its closing references), "requested_reviewers" (logins),
+    # "head_sha", "base_sha", "head_repo" (the repo its head branch is in: another for a fork),
+    # "files" ([{"filename", "patch"}]: its diff, as tests set it), "reviews" (the reviews
+    # posted: {"user", "event", "body", "commit_id", "comments": [{"path", "line", "side",
+    # "body"}]})}. Each is also in `issues` (with pull_request=True), sharing the issue
+    # numbers like on GitHub.
     pulls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
@@ -230,6 +234,9 @@ class FakeGitHub:
             ("GET", repo + "/pulls", self._list_pulls, "token"),
             ("GET", repo + r"/pulls/(\d+)", self._get_pull, "token"),
             ("POST", repo + r"/pulls/(\d+)/requested_reviewers", self._request_reviewers, "token"),
+            ("GET", repo + r"/pulls/(\d+)/files", self._pull_files, "token"),
+            ("GET", repo + r"/pulls/(\d+)/reviews", self._list_reviews, "token"),
+            ("POST", repo + r"/pulls/(\d+)/reviews", self._create_review, "token"),
             ("POST", r"/graphql", self._graphql, "installation"),
         ]
 
@@ -474,7 +481,8 @@ class FakeGitHub:
                        author=APP_LOGIN)
         pr = {"number": number, "title": body["title"], "head": body["head"],
               "base": body["base"], "body": body.get("body"), "draft": body.get("draft", False),
-              "state": "open", "closes": [], "requested_reviewers": []}
+              "state": "open", "closes": [], "requested_reviewers": [], "head_sha": None,
+              "base_sha": repo.head_sha, "head_repo": repo.full_name, "files": [], "reviews": []}
         repo.pulls[number] = pr
         return _json(201, pr)
 
@@ -487,13 +495,18 @@ class FakeGitHub:
 
     def add_pull(self, repo_name: str, number: int, title: str, head: str, *, base: str = "main",
                  body: str = "", draft: bool = False, author: str = "someone",
-                 closes: list[int] | None = None, labels=()) -> dict[str, Any]:
-        """A PR opened by `author` (not through the API)."""
+                 closes: list[int] | None = None, labels=(), head_sha: str | None = None,
+                 base_sha: str | None = None, head_repo: str | None = None,
+                 files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """A PR opened by `author` (not through the API). `head_repo` names the
+        fork its branch is in, if it's from one."""
         repo = self.repos[repo_name]
         repo.add_issue(number, title, body, labels, pull_request=True, author=author)
         pr = {"number": number, "title": title, "head": head, "base": base, "body": body,
               "draft": draft, "state": "open", "closes": list(closes or []),
-              "requested_reviewers": []}
+              "requested_reviewers": [], "head_sha": head_sha or f"{number:040x}",
+              "base_sha": base_sha or repo.head_sha, "head_repo": head_repo or repo_name,
+              "files": list(files or []), "reviews": []}
         repo.pulls[number] = pr
         return pr
 
@@ -508,7 +521,33 @@ class FakeGitHub:
         return _json(200, {"number": pr["number"],
                            "node_id": self._pull_node_id(f"{owner}/{name}", pr["number"]),
                            "title": pr["title"], "draft": pr["draft"], "state": pr["state"],
-                           "head": {"ref": pr["head"]}, "base": {"ref": pr["base"]}})
+                           "head": {"ref": pr["head"], "sha": pr["head_sha"],
+                                    "repo": {"full_name": pr["head_repo"]}},
+                           "base": {"ref": pr["base"], "sha": pr["base_sha"]}})
+
+    def _pull_files(self, owner, name, number, *, query, body):
+        pr = self.repos[f"{owner}/{name}"].pulls[int(number)]
+        return _page(f"/repos/{owner}/{name}/pulls/{number}/files", query, pr["files"])
+
+    def _list_reviews(self, owner, name, number, *, query, body):
+        pr = self.repos[f"{owner}/{name}"].pulls[int(number)]
+        return _page(f"/repos/{owner}/{name}/pulls/{number}/reviews", query, pr["reviews"])
+
+    def _create_review(self, owner, name, number, *, query, body):
+        """Like GitHub, the whole review is rejected if one comment isn't on a
+        line of the diff (a changed line or the context around it)."""
+        pr = self.repos[f"{owner}/{name}"].pulls[int(number)]
+        on_diff = {f["filename"]: diff_lines(f.get("patch")) for f in pr["files"]}
+        for c in body.get("comments", []):
+            if c.get("side", "RIGHT") != "RIGHT" or c["line"] not in on_diff.get(c["path"], ()):
+                return _json(422, {"message": "Unprocessable Entity", "errors": [
+                    "Pull request review thread line must be part of the diff"]})
+        review = {"id": next(self._ids), "user": {"login": APP_LOGIN}, "event": body.get("event"),
+                  "state": "COMMENTED" if body.get("event") == "COMMENT" else "PENDING",
+                  "body": body.get("body", ""), "commit_id": body.get("commit_id"),
+                  "comments": list(body.get("comments", []))}
+        pr["reviews"].append(review)
+        return _json(200, review)
 
     def _request_reviewers(self, owner, name, number, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
@@ -557,6 +596,18 @@ class FakeGitHub:
                                 "minimizedComment": {"isMinimized": True}}}})
             return error("Could not resolve to a node")
         return error(f"unknown operation {op}")
+
+
+def diff_lines(patch: str | None) -> set[int]:
+    """The new-side line numbers a file's patch shows (added and context lines)."""
+    lines, n = set(), 0
+    for text in (patch or "").splitlines():
+        if text.startswith("@@"):
+            n = int(re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", text).group(1))
+        elif text.startswith(("+", " ")):
+            lines.add(n)
+            n += 1
+    return lines
 
 
 def _page(path: str, query: dict[str, str], items: list[Any]) -> Response:

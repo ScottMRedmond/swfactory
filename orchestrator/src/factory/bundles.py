@@ -63,16 +63,20 @@ class Store:
     def check(
         self, repo: str, run_id: int, bundle: bytes | None, *, task: str, verdict: str | None,
         base_sha: str, pr_base_sha: str | None = None, test_paths: Sequence[str] = (),
+        findings_only: bool = False,
     ) -> Checked | None:
         """Check run `run_id`'s bundle and keep its commits for `push`.
         None if there's no bundle (and none was needed). A review's fixes may
-        touch only the PR's own files (`pr_base_sha`..`base_sha`) and `test_paths`."""
+        touch only the PR's own files (`pr_base_sha`..`base_sha`) and `test_paths`;
+        a findings-only review makes none."""
         if bundle is None:
             if task == "implement" and verdict == "built":
                 raise BundleError("implement says built but left no commits (no bundle)")
             return None
         if task in NO_BUNDLE:
             raise BundleError(f"{task} leaves no bundle, but this run left one")
+        if findings_only:
+            raise BundleError("a findings-only review leaves no bundle, but this run left one")
         if len(bundle) > MAX_BYTES:
             raise BundleError(f"the bundle is {len(bundle):,} bytes; the most is 50 MB")
         refs, prerequisites = _header(bundle)
