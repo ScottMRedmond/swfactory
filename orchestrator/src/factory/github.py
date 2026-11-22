@@ -232,6 +232,13 @@ MINIMIZE_COMMENT = """mutation MinimizeComment($id: ID!) {
 }"""
 
 
+def label_names(issue: dict[str, Any]) -> list[str]:
+    """An issue's label names (GitHub gives label objects; the fake and older
+    callers may give plain names)."""
+    return [label["name"] if isinstance(label, dict) else label
+            for label in issue.get("labels", [])]
+
+
 class GitHub:
     """The REST calls the orchestrator makes, each with a token for the repo it touches."""
 

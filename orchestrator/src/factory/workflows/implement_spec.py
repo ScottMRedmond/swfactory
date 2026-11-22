@@ -36,15 +36,14 @@ import logging
 import re
 import sqlite3
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from factory import enrolment as enrolments
 from factory import attempts, bundles, loop, review, tickets
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
-from factory.github import GitHub, GitHubError
+from factory.github import GitHub, GitHubError, label_names
 from factory.logs import about_run
-from factory.runner import Runner
 from factory.tickets import render_notice
 from factory.workflows import base, implement_ticket
 from factory.workflows.base import Context
@@ -72,7 +71,7 @@ def spec_label(spec: int | str) -> str:
 
 def is_spec_ticket(issue: dict[str, Any]) -> bool:
     """Whether the issue is a ticket of a spec: it carries a `spec:<n>` label."""
-    return any(n.startswith("spec:") for n in _labels(issue))
+    return any(n.startswith("spec:") for n in label_names(issue))
 
 
 def start(
@@ -134,7 +133,7 @@ def start_review(
             "The PR's events don't say who added `agent:review`, so nothing was started. "
             "Add it again."))
         return True
-    if workflow["status"] == "cancelled":
+    if workflow["status"] == base.CANCELLED:
         github.post_comment(repo, number, render_notice(
             f"Spec #{workflow['subject']}'s build was cancelled when this pull request was "
             "closed, so nothing was started.", mention))
@@ -143,7 +142,7 @@ def start_review(
         "SELECT * FROM runs WHERE workflow_id = ? AND task = 'auto-tickets' "
         "AND outcome = 'succeeded' ORDER BY id DESC LIMIT 1", (workflow["id"],)).fetchone()
     assert decomposed is not None  # it made the branch the PR is from
-    ctx = Context(conn, github, cast(Runner, None), settings)  # queueing never uses the runner
+    ctx = Context(conn, github, settings)
     base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
     workflow = base.get(conn, workflow["id"])
     assert workflow is not None
@@ -173,7 +172,8 @@ def cancel_closed_prs(
     is missing from it but which are still open: a merged PR closes its spec."""
     rows = conn.execute(
         "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
-        "AND status IN ('active', 'stopped', 'done') ORDER BY id", (repo, KIND)).fetchall()
+        "AND status IN (?, ?, ?) ORDER BY id",
+        (repo, KIND, base.ACTIVE, base.STOPPED, base.DONE)).fetchall()
     if full_scan:
         open_numbers = {i["number"] for i in issues}
         closed = [w for w in rows
@@ -201,7 +201,7 @@ def cancel_closed_prs(
             "is kept, so nothing built is lost. To start over, close the "
             f"`{spec_label(spec)}` tickets, delete or rename `{workflow['branch']}`, and add "
             f"`{TRIGGER}` again.", [started["triggered_by"]] if started else None))
-        base.end(Context(conn, github, cast(Runner, None), settings), workflow, "cancelled", spec)
+        base.end(Context(conn, github, settings), workflow, base.CANCELLED, spec)
         log.info("%s#%s, the PR of spec #%s, was closed without merging: workflow cancelled",
                  repo, workflow["pr"], spec, extra={"repo": repo, "ticket": str(spec)})
 
@@ -232,11 +232,11 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     elif run["task"] == "review":
         _review_result(ctx, run, workflow)
     elif run["outcome"] == "cancelled":
-        if workflow["status"] == "active":
-            base.end(ctx, workflow, "cancelled", int(run["ticket"]))
+        if workflow["status"] == base.ACTIVE:
+            base.end(ctx, workflow, base.CANCELLED, int(run["ticket"]))
     elif attempts.is_bad(run):
         # The last attempt: `factory.attempts` retried the others.
-        if workflow["status"] == "active":
+        if workflow["status"] == base.ACTIVE:
             implement_ticket.give_up(ctx, run, workflow, again=TRIGGER)
     elif run["task"] == "explore" and run["outcome"] == "succeeded":
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
@@ -257,10 +257,10 @@ def _review_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> Non
     posted, the PR marked ready and the workflow `done`; out of attempts, the
     PR stays a draft and is `agent:blocked`. A workflow ended meanwhile (the
     spec PR closed) posts nothing."""
-    if workflow["status"] != "active":
+    if workflow["status"] != base.ACTIVE:
         return
     if run["outcome"] == "cancelled":
-        base.end(ctx, workflow, "cancelled", int(run["ticket"]))
+        base.end(ctx, workflow, base.CANCELLED, int(run["ticket"]))
     elif attempts.is_bad(run):
         implement_ticket.give_up(ctx, run, workflow)
     elif review.output_used(run):
@@ -275,7 +275,7 @@ def _ticket_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> Non
     cancelled run (the ticket closed, or `factory cancel`) just leaves the
     ticket. A workflow cancelled meanwhile lands nothing."""
     repo, number = run["repo"], int(run["ticket"])
-    if run["outcome"] == "cancelled" or workflow["status"] == "cancelled":
+    if run["outcome"] == "cancelled" or workflow["status"] == base.CANCELLED:
         ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     elif attempts.is_bad(run):
         implement_ticket.give_up(ctx, run, workflow, again="agent:implement", stop=False)
@@ -375,11 +375,11 @@ def _spec_pr_body(ctx: Context, workflow: sqlite3.Row, built: int | None = None)
     repo, spec = workflow["repo"], int(workflow["subject"])
     everything = _spec_tickets(ctx, workflow)
     issue = everything.get(built) if built is not None else None
-    if built is not None and issue is not None and BUILT not in _labels(issue):
+    if built is not None and issue is not None and BUILT not in label_names(issue):
         # The issue list may lag the label just added.
-        everything[built] = {**issue, "labels": [*_labels(issue), BUILT]}
+        everything[built] = {**issue, "labels": [*label_names(issue), BUILT]}
     links = {n: _landing_link(ctx, repo, n) for n, i in everything.items()
-             if i["state"] == "open" and BUILT in _labels(i)}
+             if i["state"] == "open" and BUILT in label_names(i)}
     return render_spec_pr_body(spec, everything, links)
 
 
@@ -404,7 +404,7 @@ def render_spec_pr_body(
     lines = []
     for number in sorted(everything):
         issue = everything[number]
-        names = _labels(issue)
+        names = label_names(issue)
         if issue["state"] != "open":
             status = "closed by hand"
         elif BUILT in names:
@@ -472,7 +472,7 @@ def _explored(
     implement_ticket.post_explore(ctx, run, output, heading=NOTES_HEADING)
     spec = int(run["ticket"])
     if _refuse_open_tickets(ctx.github, run["repo"], spec, run["triggered_by"]):
-        base.end(ctx, workflow, "stopped", spec)
+        base.end(ctx, workflow, base.STOPPED, spec)
         return
     _queue_auto_tickets(ctx, run, workflow)
 
@@ -502,7 +502,7 @@ def _queue_auto_tickets(ctx: Context, after: sqlite3.Row, workflow: sqlite3.Row)
     except tickets.TooBig as e:
         ctx.github.post_comment(repo, spec,
                                 tickets.render_too_big_notice(str(e), after["triggered_by"]))
-        base.end(ctx, workflow, "stopped", spec)
+        base.end(ctx, workflow, base.STOPPED, spec)
         log.info("%s#%s is too big to dispatch: %s", repo, spec, e, extra=_about(after))
         return
     run_id = loop.enqueue(ctx.conn, repo=repo, task="auto-tickets", ticket=str(spec),
@@ -575,13 +575,13 @@ def advance(ctx: Context) -> None:
     post a notice when a stopped one's body changes. A spec whose GitHub or git
     calls fail is tried again on the next pass."""
     rows = ctx.conn.execute(
-        "SELECT * FROM workflows WHERE kind = ? AND status IN ('active', 'stopped') "
-        "AND branch IS NOT NULL ORDER BY id", (KIND,)).fetchall()
+        "SELECT * FROM workflows WHERE kind = ? AND status IN (?, ?) "
+        "AND branch IS NOT NULL ORDER BY id", (KIND, base.ACTIVE, base.STOPPED)).fetchall()
     for workflow in rows:
         if enrolments.get(ctx.conn, workflow["repo"]) is None:
             continue  # unenrolled: its workflows are stopped
         try:
-            if workflow["status"] == "stopped":
+            if workflow["status"] == base.STOPPED:
                 _check_spec_body(ctx, workflow)
             else:
                 _advance_one(ctx, workflow)
@@ -669,7 +669,7 @@ def queue(
         if in_flight >= ctx.settings.per_spec_concurrency:
             break
         issue = everything[number]
-        names = _labels(issue)
+        names = label_names(issue)
         if (issue["state"] != "open" or BUILT in names or str(number) in busy
                 or any(label in names for label in base.STALE)):
             continue
@@ -691,7 +691,7 @@ def _settle(ctx: Context, workflow: sqlite3.Row) -> None:
         return
     everything = _spec_tickets(ctx, workflow)
     still_open = [i for i in everything.values() if i["state"] == "open"]
-    if still_open and all(BUILT in _labels(i) for i in still_open):
+    if still_open and all(BUILT in label_names(i) for i in still_open):
         _queue_spec_review(ctx, workflow)
         return
     lines = stall(everything, _landed(ctx, workflow["repo"], everything))
@@ -716,7 +716,7 @@ def _stalled(ctx: Context, workflow: sqlite3.Row, lines: list[str]) -> None:
         "`## Blocked by`, then add `agent:implement` to a ticket that can be built.",
         [started["triggered_by"]] if started else None))
     _refresh_spec_pr(ctx, workflow)
-    base.end(ctx, workflow, "stopped", spec)
+    base.end(ctx, workflow, base.STOPPED, spec)
     log.info("%s#%s: the spec stalled", repo, spec, extra={"repo": repo, "ticket": str(spec)})
 
 
@@ -727,12 +727,12 @@ def stall(everything: dict[int, dict[str, Any]], landed: "Landed") -> list[str] 
     is stuck by its label (`needs-a-human`, `waiting`, `agent:blocked`), a
     blocker closed by hand or that doesn't exist, a cycle, or a stuck blocker."""
     unbuilt = {n: i for n, i in everything.items()
-               if i["state"] == "open" and BUILT not in _labels(i)}
+               if i["state"] == "open" and BUILT not in label_names(i)}
     own: dict[int, str] = {}  # what holds a ticket back by itself
     deps: dict[int, list[int]] = {}  # its blockers among the unbuilt tickets
     outside: dict[int, list[int]] = {}  # its open blockers outside the spec
     for number, issue in unbuilt.items():
-        names = _labels(issue)
+        names = label_names(issue)
         deps[number], outside[number] = [], []
         reasons = [_STUCK[label] for label in base.STALE if label in names]
         for b in blockers(issue.get("body")):
@@ -830,7 +830,7 @@ class Landed:
     def __call__(self, number: int) -> bool:
         if number in self._everything:
             issue = self._everything[number]
-            return issue["state"] == "open" and BUILT in _labels(issue)
+            return issue["state"] == "open" and BUILT in label_names(issue)
         if number not in self._outside:
             try:
                 state = self._ctx.github.get_issue(self._repo, number)["state"]
@@ -863,7 +863,7 @@ def start_ticket(
     whoever added the label. Returns the spec's workflow id, or None when a
     notice says why nothing changed."""
     repo, number = enrolment.repo, issue["number"]
-    spec = next(n.removeprefix("spec:") for n in _labels(issue) if n.startswith("spec:"))
+    spec = next(n.removeprefix("spec:") for n in label_names(issue) if n.startswith("spec:"))
     mention = [triggered_by.login] if triggered_by else None
     if triggered_by is None or triggered_by.id is None:
         github.post_comment(repo, number, render_notice(
@@ -873,7 +873,7 @@ def start_ticket(
     workflow = conn.execute(
         "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND subject = ? "
         "AND branch IS NOT NULL ORDER BY id DESC LIMIT 1", (repo, KIND, spec)).fetchone()
-    if workflow is None or workflow["status"] == "cancelled":
+    if workflow is None or workflow["status"] == base.CANCELLED:
         why = ("isn't being built by the factory" if workflow is None
                else "had its build cancelled when its pull request was closed")
         github.post_comment(repo, number, render_notice(
@@ -887,7 +887,7 @@ def start_ticket(
     base.mark_in_progress(github, repo, int(spec))
     workflow = base.get(conn, workflow["id"])
     assert workflow is not None
-    ctx = Context(conn, github, cast(Runner, None), settings)  # queueing never uses the runner
+    ctx = Context(conn, github, settings)
     if number in queue(ctx, workflow, prefer=(number, triggered_by)):
         return workflow["id"]
     everything = _spec_tickets(ctx, workflow)
@@ -939,11 +939,6 @@ def _queue_ticket(
     log.info("queued implement run %s for %s#%s, a ticket of spec #%s", run_id, repo, number,
              workflow["subject"], extra=about_run(id=run_id, repo=repo, ticket=str(number)))
     return True
-
-
-def _labels(issue: dict[str, Any]) -> list[str]:
-    return [label["name"] if isinstance(label, dict) else label
-            for label in issue.get("labels", [])]
 
 
 def _store(ctx: Context) -> bundles.Store:
@@ -1013,7 +1008,7 @@ def _create_integration_branch(ctx: Context, run: sqlite3.Row, workflow: sqlite3
             "nothing is built (the factory never force-pushes). Delete or rename it, close "
             f"the `{spec_label(spec)}` tickets, and add `agent:implement-spec` again.",
             [run["triggered_by"]] if run["triggered_by"] else None))
-        base.end(ctx, workflow, "stopped", spec, "needs-a-human")
+        base.end(ctx, workflow, base.STOPPED, spec, "needs-a-human")
         log.info("%s#%s: %s already exists elsewhere; workflow stopped", repo, spec, branch,
                  extra=_about(run))
         return False
@@ -1034,7 +1029,7 @@ def _needs_a_human(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, commen
         f"<!-- factory:auto-tickets run={run['id']} -->\n## Auto-tickets\n\n"
         f"**Verdict:** `needs-a-human`\n\n{comment.strip()}\n\n"
         f"---\nFactory run {run['id']} · [runner log]({link})\n"))
-    base.end(ctx, workflow, "stopped", spec, "needs-a-human")
+    base.end(ctx, workflow, base.STOPPED, spec, "needs-a-human")
     log.info("auto-tickets run %s: %s#%s needs a human", run["id"], repo, spec, extra=_about(run))
 
 

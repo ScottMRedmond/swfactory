@@ -62,7 +62,7 @@ def not_an_attempt(conn: sqlite3.Connection, run: sqlite3.Row) -> bool:
                       "orchestrator's contract_version. Dispatching is paused until the "
                       "orchestrator is redeployed and restarted.", run["id"], extra=about)
         db_state.open_problem(
-            conn, "contract_mismatch",
+            conn, db_state.CONTRACT_MISMATCH,
             "The runner rejected the dispatch's contract_version, so dispatching is paused. "
             "Merge the schema change, then redeploy and restart the orchestrator.")
     elif reason == "claude_auth":
@@ -70,7 +70,7 @@ def not_an_attempt(conn: sqlite3.Connection, run: sqlite3.Row) -> bool:
             log.error("run %s failed with claude_auth: dispatches for %s are held until the "
                       "orchestrator restarts", run["id"], run["repo"], extra=about)
         db_state.open_problem(
-            conn, "claude_auth",
+            conn, db_state.CLAUDE_AUTH,
             f"Claude rejected the token on {run['repo']} (expired, revoked or missing), so its "
             "runs are held. Set the CLAUDE_CODE_OAUTH_TOKEN secret, then restart the orchestrator.",
             repo=run["repo"])
@@ -81,18 +81,18 @@ def not_an_attempt(conn: sqlite3.Connection, run: sqlite3.Row) -> bool:
 
 def dispatch_paused(conn: sqlite3.Connection) -> bool:
     """A `contract_mismatch` has paused dispatching."""
-    return any(p["kind"] == "contract_mismatch" for p in db_state.open_problems(conn))
+    return db_state.has_open_problem(conn, db_state.CONTRACT_MISMATCH)
 
 
 def held_repos(conn: sqlite3.Connection) -> set[str]:
     """Repos whose dispatches `claude_auth` holds."""
-    return {p["repo"] for p in db_state.open_problems(conn) if p["kind"] == "claude_auth"}
+    return {p["repo"] for p in db_state.open_problems(conn) if p["kind"] == db_state.CLAUDE_AUTH}
 
 
 def lift_holds(conn: sqlite3.Connection) -> None:
     """At startup: a restart is how a human says the cause is fixed."""
     for problem in db_state.open_problems(conn):
-        if problem["kind"] in ("contract_mismatch", "claude_auth"):
+        if problem["kind"] in (db_state.CONTRACT_MISMATCH, db_state.CLAUDE_AUTH):
             log.info("lifting the %s hold%s at startup", problem["kind"],
                      f" on {problem['repo']}" if problem["repo"] else "")
             db_state.close_problem(conn, problem["kind"], repo=problem["repo"])

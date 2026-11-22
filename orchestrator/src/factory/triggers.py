@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from factory.enrolment import Enrolment
-from factory.github import GitHub
+from factory.github import GitHub, label_names
 
 # The trigger labels and the task (or workflow) each starts.
 LABELS = {
@@ -166,10 +166,6 @@ def _wrong_kind(label: str, issue: dict[str, Any]) -> str | None:
         return (f"This ticket is `agent:built`: its code has already landed on the spec's "
                 f"integration branch, so fix it on the spec's pull request{of} instead.")
     return None
-
-
-def label_names(issue: dict[str, Any]) -> list[str]:
-    return [l["name"] if isinstance(l, dict) else l for l in issue.get("labels", [])]
 
 
 def adders(github: GitHub, repo: str, number: int) -> dict[str, Added]:

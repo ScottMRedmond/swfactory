@@ -39,10 +39,10 @@ def on_result(ctx: Context, run: sqlite3.Row) -> None:
     if workflow is None:
         return
     if not_an_attempt:
-        if workflow["status"] == "active":
+        if workflow["status"] == base.ACTIVE:
             attempts.requeue(ctx.conn, run, attempt=run["attempt"])
         return
-    if workflow["status"] == "active" and attempts.is_bad(run) and attempts.retry(ctx.conn, run):
+    if workflow["status"] == base.ACTIVE and attempts.is_bad(run) and attempts.retry(ctx.conn, run):
         return
     try:
         BY_KIND[workflow["kind"]].on_result(ctx, run, workflow)
@@ -66,8 +66,8 @@ def _lost(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, why: bundles.Lo
     if workflow["kind"] == implement_spec.KIND and run["task"] == "implement":
         ctx.github.add_labels(repo, number, ["needs-a-human"])
         ctx.github.remove_label(repo, number, base.IN_PROGRESS)
-    elif workflow["status"] == "active":
-        base.end(ctx, workflow, "stopped", number, "needs-a-human")
+    elif workflow["status"] == base.ACTIVE:
+        base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
 
 
 def prepare(ctx: Context, run: sqlite3.Row) -> dict[str, Any] | None:

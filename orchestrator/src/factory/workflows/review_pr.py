@@ -96,16 +96,16 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """Act on a done run: a cancelled one (the PR closed) cancels the
     workflow, the last bad attempt gives up, and a used result is posted."""
     number = int(workflow["subject"])
-    if workflow["status"] != "active":
+    if workflow["status"] != base.ACTIVE:
         return
     if run["outcome"] == "cancelled":
-        base.end(ctx, workflow, "cancelled", number)
+        base.end(ctx, workflow, base.CANCELLED, number)
     elif attempts.is_bad(run):
         _give_up(ctx, run, workflow)
     elif review.output_used(run):
         link = ctx.runner.log_link(run["repo"], run["runner_run_id"])
         review.publish(ctx.github, run["repo"], number, run["id"], json.loads(run["result"]), link)
-        base.end(ctx, workflow, "done", number)
+        base.end(ctx, workflow, base.DONE, number)
         log.info("findings-only review run %s posted on %s#%s", run["id"], run["repo"], number,
                  extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
 
@@ -120,6 +120,6 @@ def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
         f"The factory gave up on `review` after {run['attempt']} attempts: the last, {last}, "
         f"ended `{ended}`. Add `agent:review` to try again from attempt 1.",
         [run["triggered_by"]] if run["triggered_by"] else None))
-    base.end(ctx, workflow, "stopped", number, "agent:blocked")
+    base.end(ctx, workflow, base.STOPPED, number, "agent:blocked")
     log.info("gave up on reviewing %s#%s after run %s ended %s", repo, number, run["id"], ended,
              extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))

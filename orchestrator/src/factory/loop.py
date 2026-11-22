@@ -461,8 +461,8 @@ def _available(conn: sqlite3.Connection) -> None:
     if db_state.runner_unavailable_since(conn) is not None:
         log.info("the runner answers again")
         db_state.set_runner_unavailable_since(conn, None)
-    if any(p["kind"] == "runner_unavailable" for p in db_state.open_problems(conn)):
-        db_state.close_problem(conn, "runner_unavailable")
+    if db_state.has_open_problem(conn, db_state.RUNNER_UNAVAILABLE):
+        db_state.close_problem(conn, db_state.RUNNER_UNAVAILABLE)
 
 
 def _check_unavailable(conn: sqlite3.Connection, now: datetime) -> None:
@@ -470,8 +470,8 @@ def _check_unavailable(conn: sqlite3.Connection, now: datetime) -> None:
     since = db_state.runner_unavailable_since(conn)
     if since is None or now - datetime.fromisoformat(since) < UNAVAILABLE_PROBLEM_AFTER:
         return
-    if not any(p["kind"] == "runner_unavailable" for p in db_state.open_problems(conn)):
+    if not db_state.has_open_problem(conn, db_state.RUNNER_UNAVAILABLE):
         log.error("the runner has been unavailable since %s", since)
-        db_state.open_problem(conn, "runner_unavailable",
+        db_state.open_problem(conn, db_state.RUNNER_UNAVAILABLE,
                            f"The runner has been unavailable (or refusing runs) since {since}, "
                            "so nothing is dispatched or collected.")

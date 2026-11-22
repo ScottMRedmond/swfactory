@@ -8,7 +8,7 @@ than to one run; `status` is `active`, `done`, `stopped` or `cancelled`.
 
 import sqlite3
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from factory.github import GitHub
 from factory.runner import Runner
@@ -16,19 +16,37 @@ from factory.runner import Runner
 if TYPE_CHECKING:
     from factory.orchestrator import Settings
 
+# A workflow's status (the `workflows.status` column).
+ACTIVE = "active"
+DONE = "done"
+STOPPED = "stopped"
+CANCELLED = "cancelled"
+
 IN_PROGRESS = "agent:in-progress"
 # Status labels a run starting makes stale (orchestrator.md#chaining).
 STALE = ("needs-a-human", "waiting", "agent:blocked")
 
 
+class _NoRunner:
+    """The runner where nothing may use it: starting, queueing and ending a
+    workflow never do. Any use fails loudly."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(f"this Context has no runner (asked for {name})")
+
+
+NO_RUNNER = cast(Runner, _NoRunner())
+
+
 @dataclass(frozen=True)
 class Context:
-    """What a workflow acts with."""
+    """What a workflow acts with. Handling a run's result needs the runner;
+    starting, queueing and ending a workflow leave it out."""
 
     conn: sqlite3.Connection
     github: GitHub
-    runner: Runner
     settings: "Settings"
+    runner: Runner = NO_RUNNER
 
 
 class Workflow(Protocol):
@@ -58,11 +76,11 @@ def start(conn: sqlite3.Connection, *, repo: str, kind: str, subject: str) -> in
             (repo, kind, subject),
         ).fetchone()
         if row is not None:
-            conn.execute("UPDATE workflows SET status = 'active' WHERE id = ?", (row["id"],))
+            conn.execute("UPDATE workflows SET status = ? WHERE id = ?", (ACTIVE, row["id"]))
             return row["id"]
         return conn.execute(
-            "INSERT INTO workflows (repo, kind, subject, status) VALUES (?, ?, ?, 'active')",
-            (repo, kind, subject),
+            "INSERT INTO workflows (repo, kind, subject, status) VALUES (?, ?, ?, ?)",
+            (repo, kind, subject, ACTIVE),
         ).lastrowid
 
 
@@ -80,8 +98,9 @@ def mark_in_progress(github: GitHub, repo: str, number: int) -> None:
 def end(
     ctx: Context, workflow: sqlite3.Row, status: str, number: int, label: str | None = None
 ) -> None:
-    """End the workflow with `status`: `agent:in-progress` comes off issue
-    `number`, and `label` (what stopped it) goes on."""
+    """End the workflow with `status` (`DONE`, `STOPPED` or `CANCELLED`):
+    `agent:in-progress` comes off issue `number`, and `label` (what stopped
+    it) goes on."""
     if label is not None:
         ctx.github.add_labels(workflow["repo"], number, [label])
     ctx.github.remove_label(workflow["repo"], number, IN_PROGRESS)

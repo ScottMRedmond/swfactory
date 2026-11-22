@@ -33,12 +33,12 @@ from factory.github import GitHub, GitHubError
 log = logging.getLogger(__name__)
 
 TITLES = {
-    "usage_unreadable": "Factory problem: Claude usage can't be read",
-    "contract_mismatch": "Factory problem: contract_mismatch, dispatching is paused",
-    "runner_unavailable": "Factory problem: the runner is unavailable",
-    "poll_failing": "Factory problem: polling this repo is failing",
-    "claude_auth": "Factory problem: Claude auth is failing on this repo",
-    "invalid_enrolment": "Factory problem: .factory/config.yml fails its schema",
+    db_state.USAGE_UNREADABLE: "Factory problem: Claude usage can't be read",
+    db_state.CONTRACT_MISMATCH: "Factory problem: contract_mismatch, dispatching is paused",
+    db_state.RUNNER_UNAVAILABLE: "Factory problem: the runner is unavailable",
+    db_state.POLL_FAILING: "Factory problem: polling this repo is failing",
+    db_state.CLAUDE_AUTH: "Factory problem: Claude auth is failing on this repo",
+    db_state.INVALID_ENROLMENT: "Factory problem: .factory/config.yml fails its schema",
 }
 
 
@@ -50,10 +50,10 @@ def check_usage(conn: sqlite3.Connection, now: datetime) -> None:
     """Open the `usage_unreadable` problem once usage has been unreadable for
     15 minutes, and close it when a reading succeeds."""
     since = db_state.usage_unreadable_since(conn)
-    is_open = any(p["kind"] == "usage_unreadable" for p in db_state.open_problems(conn))
+    is_open = db_state.has_open_problem(conn, db_state.USAGE_UNREADABLE)
     if since is None:
         if is_open:
-            db_state.close_problem(conn, "usage_unreadable")
+            db_state.close_problem(conn, db_state.USAGE_UNREADABLE)
         return
     if now - datetime.fromisoformat(since) < USAGE_UNREADABLE_AFTER:
         return
@@ -62,7 +62,7 @@ def check_usage(conn: sqlite3.Connection, now: datetime) -> None:
     if not is_open:
         log.error("Claude usage has been unreadable since %s: %s", since, error)
     db_state.open_problem(
-        conn, "usage_unreadable",
+        conn, db_state.USAGE_UNREADABLE,
         f"Claude usage hasn't been readable since {since} (latest: {error}), so nothing is "
         "dispatched: the factory fails closed. Check `claude -p /usage` as the factory user.")
 

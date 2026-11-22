@@ -330,9 +330,8 @@ class Poller:
         state.next_at = now + state.wait
         state.failing_since, state.alerted = None, False
         db_state.record_poll(conn, repo)
-        if any(p["kind"] == "poll_failing" and p["repo"] == repo
-               for p in db_state.open_problems(conn)):
-            db_state.close_problem(conn, "poll_failing", repo=repo)
+        if db_state.has_open_problem(conn, db_state.POLL_FAILING, repo=repo):
+            db_state.close_problem(conn, db_state.POLL_FAILING, repo=repo)
 
     def _failed(
         self,
@@ -364,7 +363,7 @@ class Poller:
             # The problem issue says what kind of error it was, never GitHub's message.
             what = f"HTTP {error.status}" if isinstance(error, GitHubError) else type(error).__name__
             db_state.open_problem(
-                conn, "poll_failing",
+                conn, db_state.POLL_FAILING,
                 f"Polling this repo has failed since {since} ({what}), so new trigger labels "
                 "aren't seen. The factory keeps retrying and closes this when a poll succeeds.",
                 repo=repo)
@@ -411,7 +410,7 @@ def run_once(
     """
     woke = (poller or Poller()).poll_all(conn, github, settings)
     held = enrolments.held(conn)
-    ctx = workflows.Context(conn, github, runner, settings)
+    ctx = workflows.Context(conn, github, settings, runner)
     if woke and poller is not None:
         usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
     implement_spec.advance(ctx)
@@ -486,7 +485,7 @@ def handle_finished(
     A row is marked handled only after its writes succeed, so a failed post
     is tried again on the next pass.
     """
-    ctx = workflows.Context(conn, github, runner, settings or Settings())
+    ctx = workflows.Context(conn, github, settings or Settings(), runner)
     rows = conn.execute(
         "SELECT * FROM runs WHERE status = 'done' AND handled_at IS NULL ORDER BY id"
     ).fetchall()

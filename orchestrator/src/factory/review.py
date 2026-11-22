@@ -22,7 +22,7 @@ from dataclasses import replace
 from typing import Any
 
 from factory import tickets
-from factory.github import GitHub
+from factory.github import GitHub, label_names
 
 log = logging.getLogger(__name__)
 
@@ -42,25 +42,23 @@ def against(conn: sqlite3.Connection, github: GitHub, repo: str, pr: int) -> lis
     spec PR against the spec and every open ticket of it built on the
     integration branch (one closed by hand isn't); any other against the
     issues it closes. Empty means `no-ticket`."""
+    # Here, not at the top: the workflows import this module.
+    from factory.workflows import implement_spec, implement_ticket
+
     row = conn.execute(
         "SELECT kind, subject FROM workflows WHERE repo = ? "
-        "AND kind IN ('implement-ticket', 'implement-spec') AND pr = ? ORDER BY id DESC LIMIT 1",
-        (repo, pr),
+        "AND kind IN (?, ?) AND pr = ? ORDER BY id DESC LIMIT 1",
+        (repo, implement_ticket.KIND, implement_spec.KIND, pr),
     ).fetchone()
-    if row is not None and row["kind"] == "implement-spec":
+    if row is not None and row["kind"] == implement_spec.KIND:
         spec = int(row["subject"])
         built = sorted(i["number"] for i in github.issues_with_label(repo, f"spec:{spec}")
                        if "pull_request" not in i and i["state"] == "open"
-                       and "agent:built" in _labels(i))
+                       and "agent:built" in label_names(i))
         return [spec, *built]
     if row is not None:
         return [int(row["subject"])]
     return github.closing_issues(repo, pr)
-
-
-def _labels(issue: dict[str, Any]) -> list[str]:
-    return [label["name"] if isinstance(label, dict) else label
-            for label in issue.get("labels", [])]
 
 
 def render_input(

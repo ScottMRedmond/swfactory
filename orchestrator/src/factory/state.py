@@ -150,6 +150,14 @@ def last_polls(conn: sqlite3.Connection) -> list[tuple[str, str]]:
 
 # --- factory problems ---
 
+# The kinds of factory problem (orchestrator.md#factory-problems).
+USAGE_UNREADABLE = "usage_unreadable"
+CONTRACT_MISMATCH = "contract_mismatch"
+RUNNER_UNAVAILABLE = "runner_unavailable"
+POLL_FAILING = "poll_failing"
+CLAUDE_AUTH = "claude_auth"
+INVALID_ENROLMENT = "invalid_enrolment"
+
 
 def open_problem(
     conn: sqlite3.Connection,
@@ -194,6 +202,15 @@ def close_problem(conn: sqlite3.Connection, kind: str, *, repo: str | None = Non
 
 def open_problems(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM problems WHERE closed_at IS NULL ORDER BY id").fetchall()
+
+
+def has_open_problem(conn: sqlite3.Connection, kind: str, *, repo: str | None = None) -> bool:
+    """Whether a problem of `kind` is open about `repo` (None: the whole factory)."""
+    return conn.execute(
+        """SELECT 1 FROM problems
+           WHERE kind = ? AND coalesce(repo, '') = coalesce(?, '') AND closed_at IS NULL""",
+        (kind, repo),
+    ).fetchone() is not None
 
 
 def unsynced_problems(conn: sqlite3.Connection) -> list[sqlite3.Row]:
