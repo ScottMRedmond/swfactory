@@ -80,7 +80,7 @@ def test_only_enrolled_repos_are_polled_for_triggers(conn, fake, github, runner,
     orchestrator.run_once(conn, github, runner, settings)
 
     assert [(r["repo"], r["ticket"]) for r in runs(conn)] == [("octo/widgets", "1")]
-    assert widget.labels == []
+    assert widget.labels == ["agent:in-progress"]
     assert gadget.labels == ["agent:explore"]
 
 
@@ -202,7 +202,7 @@ def test_a_disabled_repo_queues_triggers_but_dispatches_nothing(
 
     assert [(r["repo"], r["status"]) for r in runs(conn)] == [
         ("octo/gadgets", "dispatched"), ("octo/widgets", "queued")]
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
 
     repo.files[".factory/config.yml"] = CONFIG  # enabled again
     enrolment.refresh(conn, github, factory_repo=FACTORY_REPO)
@@ -222,7 +222,8 @@ def explore_result(run_id):
 
 @pytest.fixture
 def busy(conn, fake, github, runner, settings):
-    """octo/widgets with one explore in flight, one queued and an active workflow."""
+    """octo/widgets with one explore in flight, one queued (each in an active
+    workflow) and a done workflow."""
     repo = enrolled_repo(fake, "octo/widgets")
     repo.add_issue(1, "T", labels=["agent:explore"])
     repo.add_issue(2, "T", labels=["agent:explore"])
@@ -230,8 +231,7 @@ def busy(conn, fake, github, runner, settings):
     orchestrator.run_once(conn, github, FakeRunner(), orchestrator.Settings(max_in_flight=0))
     loop.tick(conn, runner, limit=1)
     conn.execute("""INSERT INTO workflows (repo, kind, subject, status)
-                    VALUES ('octo/widgets', 'implement-ticket', '1', 'active'),
-                           ('octo/widgets', 'implement-ticket', '9', 'done')""")
+                    VALUES ('octo/widgets', 'implement-ticket', '9', 'done')""")
     assert [r["status"] for r in runs(conn)] == ["dispatched", "queued"]
     return repo
 
@@ -254,7 +254,7 @@ def test_unenrolling_cancels_queued_runs_and_stops_active_workflows(
     assert polled(conn) == []
     assert [(r["status"], r["outcome"]) for r in runs(conn)] == [
         ("dispatched", None), ("done", "cancelled")]
-    assert workflow_statuses(conn) == ["stopped", "done"]
+    assert workflow_statuses(conn) == ["stopped", "stopped", "done"]
 
 
 def test_an_in_flight_run_of_an_unenrolled_repo_finishes_but_posts_nothing(

@@ -5,7 +5,8 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Every trigger label is checked (`factory.triggers`); only explore is queued so far.
+Every trigger label is checked (`factory.triggers`); only explore is queued so
+far. What a finished run leads to is its workflow's business (`factory.workflows`).
 """
 
 import json
@@ -18,19 +19,24 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import enrolment as enrolments
-from factory import loop, tickets, triggers
+from factory import loop, triggers, workflows
 from factory import state as db_state
-from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
 from factory.logs import about_run
 from factory.runner import Runner
+from factory.tickets import render_notice
+from factory.workflows import implement_ticket
 
 log = logging.getLogger(__name__)
 
 # Per-task timeouts in minutes, for the whole job. They live here only and travel
 # in each dispatch; a run still running 15 minutes past its timeout is cancelled.
 DEFAULT_TIMEOUTS = {"explore": 20, "auto-tickets": 20, "implement": 45, "review": 45}
+# Explore and auto-tickets mostly read and judge, so they get a cheaper model;
+# implement and review the strongest (orchestrator.md#limits-and-brakes).
+DEFAULT_MODELS = {"explore": "claude-sonnet-4-6", "auto-tickets": "claude-sonnet-4-6",
+                  "implement": "claude-opus-4-6", "review": "claude-opus-4-6"}
 
 
 @dataclass(frozen=True)
@@ -45,7 +51,7 @@ class Settings:
     max_in_flight: int = 2
     per_issue_concurrency: int = 1  # active runs per issue or PR, whatever the task
     timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
-    models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
+    models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
 
     def timeout(self, task: str, enrolment: Enrolment) -> int:
         return enrolment.config.timeouts.get(task, self.timeouts[task])
@@ -97,46 +103,9 @@ def handle_triggers(
         if isinstance(decision, triggers.Rejection):
             _reject(github, repo, issue, decision)
         elif decision.task == "explore":
-            _queue_explore(conn, github, repo, issue, enrolment, settings, decision.triggered_by)
+            implement_ticket.start_explore(conn, github, settings, issue, enrolment,
+                                           decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
-
-
-def _queue_explore(
-    conn: sqlite3.Connection,
-    github: GitHub,
-    repo: str,
-    issue: dict[str, Any],
-    enrolment: Enrolment,
-    settings: Settings,
-    triggered_by: triggers.Added | None,
-) -> None:
-    ticket = str(issue["number"])
-    login = triggered_by.login if triggered_by else None
-    head = github.default_branch_head(repo)
-    try:
-        dispatch = tickets.fit(
-            {
-                "contract_version": CONTRACT_VERSION,
-                "repo": repo,
-                "task": "explore",
-                "ticket": ticket,
-                "older_issues": tickets.older_issues(github, repo, issue["number"]),
-                "base_sha": head,
-                "enrolment_sha": enrolment.sha,
-                "model": settings.model("explore", enrolment),
-                "timeout_minutes": settings.timeout("explore", enrolment),
-            },
-            tickets.fetch(github, repo, issue),
-        )
-    except tickets.TooBig as e:
-        github.post_comment(repo, issue["number"], render_too_big_notice(str(e), login))
-        log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
-        return
-    run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch,
-                          triggered_by=login,
-                          triggered_by_id=triggered_by.id if triggered_by else None)
-    log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
-             extra=about_run(id=run_id, repo=repo, ticket=ticket))
 
 
 def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
@@ -164,12 +133,6 @@ def _reject(
                  extra={"repo": repo, "ticket": str(number)})
     for label in rejection.labels:
         github.remove_label(repo, number, label)
-
-
-def render_notice(message: str, mention: list[str] | None = None) -> str:
-    """A notice: a new comment, marked, @mentioning who has to act."""
-    who = "".join(f"@{login} " for login in mention or [])
-    return f"{tickets.NOTICE_MARK}\n{who}{message}\n"
 
 
 def cancel_closed(
@@ -207,19 +170,6 @@ def cancel_closed(
             log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"],
                      extra=_about(row))
             loop.request_cancel(conn, row["id"])
-
-
-def render_too_big_notice(reason: str, mention: str | None = None) -> str:
-    """The notice for a ticket whose title and body alone don't fit in a dispatch.
-
-    `mention` is the login that triggered the run.
-    """
-    return render_notice(
-        f"This ticket's title and body are too long to dispatch ({reason}). "
-        "Please shorten it, for example by moving logs or long examples into a linked "
-        "file or gist, then add the label again.",
-        [mention] if mention else [],
-    )
 
 
 def _about(row: sqlite3.Row) -> dict[str, Any]:
@@ -381,27 +331,25 @@ def run_once(
     """
     (poller or Poller()).poll_all(conn, github, settings)
     loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn))
-    handle_finished(conn, github, runner)
+    handle_finished(conn, github, runner, settings)
 
 
-def handle_finished(conn: sqlite3.Connection, github: GitHub, runner: Runner) -> None:
-    """Write each done run's result to GitHub, once.
+def handle_finished(
+    conn: sqlite3.Connection, github: GitHub, runner: Runner, settings: Settings | None = None
+) -> None:
+    """Hand each done run to its workflow, once (see `factory.workflows`), which
+    posts its result and queues what comes next.
 
     A row is marked handled only after its writes succeed, so a failed post
     is tried again on the next pass.
     """
+    ctx = workflows.Context(conn, github, runner, settings or Settings())
     rows = conn.execute(
         "SELECT * FROM runs WHERE status = 'done' AND handled_at IS NULL ORDER BY id"
     ).fetchall()
     for row in rows:
         try:
-            if row["task"] == "explore" and row["outcome"] == "succeeded":
-                result = json.loads(row["result"])
-                link = runner.log_link(row["repo"], row["runner_run_id"])
-                body = render_explore_comment(row["id"], result["output"], link)
-                github.post_comment(row["repo"], int(row["ticket"]), body)
-                log.info("posted explore findings of run %s on %s#%s",
-                         row["id"], row["repo"], row["ticket"], extra=_about(row))
+            workflows.on_result(ctx, row)
         except (GitHubError, OSError) as e:
             log.error("run %s: writing the result to GitHub failed: %s", row["id"], e,
                       extra=_about(row))
@@ -411,33 +359,6 @@ def handle_finished(conn: sqlite3.Connection, github: GitHub, runner: Runner) ->
                 "UPDATE runs SET handled_at = ? WHERE id = ?",
                 (datetime.now(UTC).isoformat(timespec="seconds"), row["id"]),
             )
-
-
-def render_explore_comment(run_id: int, output: dict[str, Any], log_link: str) -> str:
-    """Explore's findings under the factory's own headings, the same every time."""
-
-    def section(heading: str, text: str) -> str:
-        return f"### {heading}\n\n{text.strip()}\n"
-
-    def listed(items: list[str], numbered: bool) -> str:
-        if not items:
-            return "None."
-        return "\n".join(f"{i}. {x}" if numbered else f"- {x}" for i, x in enumerate(items, 1))
-
-    parts = [
-        f"<!-- factory:explore run={run_id} -->\n## Explore findings\n",
-        f"**Verdict:** `{output['verdict']}`\n",
-        section("Summary", output["summary"]),
-        section("Findings", output["findings"]),
-        section("Plan", listed(output["plan"], numbered=True)),
-        section("Files", listed([f"`{f}`" for f in output["files"]], numbered=False)),
-    ]
-    if output.get("questions"):
-        parts.append(section("Questions", listed(output["questions"], numbered=True)))
-    if output.get("duplicate_of"):
-        parts.append(section("Duplicate of", f"#{output['duplicate_of']}"))
-    parts.append(f"---\nFactory run {run_id} · [runner log]({log_link})\n")
-    return "\n".join(parts)
 
 
 def serve(

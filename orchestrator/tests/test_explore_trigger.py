@@ -87,7 +87,7 @@ def test_a_labelled_issue_is_queued_for_explore_and_the_label_removed(conn, gith
 
     [row] = runs(conn)
     assert (row["repo"], row["task"], row["ticket"], row["status"]) == (REPO, "explore", "7", "queued")
-    assert issue.labels == ["bug"]
+    assert issue.labels == ["bug", "agent:in-progress"]
     dispatch = parse_dispatch(json.loads(row["dispatch"]))
     assert dispatch.task == "explore"
     assert dispatch.run_id == row["id"]
@@ -187,7 +187,9 @@ def run_to_finish(conn, github, runner, settings, result_for):
 def test_an_explore_result_is_posted_as_findings_under_the_factorys_headings(
     conn, github, repo, runner, settings
 ):
-    issue = repo.add_issue(7, "Search ignores accents", "Body", labels=["agent:explore"])
+    repo.permissions["alice"] = "write"  # the author: easy-call goes straight on to implement
+    issue = repo.add_issue(7, "Search ignores accents", "Body", author="alice")
+    issue.label("agent:explore", by="alice")
 
     run_id = run_to_finish(conn, github, runner, settings, explore_result)
 
@@ -242,6 +244,7 @@ def test_questions_and_duplicate_of_get_their_own_headings_and_empty_lists_say_n
 
 
 def test_a_duplicate_names_the_issue_it_duplicates(conn, github, repo, runner, settings):
+    repo.add_issue(3, "Older")
     issue = repo.add_issue(7, "T", labels=["agent:explore"])
 
     run_to_finish(
@@ -336,7 +339,7 @@ def test_one_repo_failing_doesnt_stop_the_others(conn, fake, github, runner, set
     orchestrator.run_once(conn, github, runner, settings)
 
     assert [r["repo"] for r in runs(conn)] == ["octo/gadgets"]
-    assert issue.labels == []
+    assert issue.labels == ["agent:in-progress"]
     assert [repo for repo, _ in state.last_polls(conn)] == ["octo/gadgets"]  # for `factory status`
 
 

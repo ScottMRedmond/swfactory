@@ -339,6 +339,22 @@ class GitHub:
     def post_comment(self, repo: str, number: int, body: str) -> None:
         self._call(repo, "POST", f"/issues/{number}/comments", {"body": body})
 
+    def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
+        """Add labels to an issue or PR, keeping the ones it has."""
+        self._call(repo, "POST", f"/issues/{number}/labels", {"labels": labels})
+
+    def close_as_duplicate(self, repo: str, number: int) -> None:
+        """Close an issue with the reason `duplicate`, or `not_planned` if GitHub
+        doesn't take that reason (it was added in 2025)."""
+        try:
+            self._call(repo, "PATCH", f"/issues/{number}",
+                       {"state": "closed", "state_reason": "duplicate"})
+        except GitHubError as e:
+            if e.status != 422:
+                raise
+            self._call(repo, "PATCH", f"/issues/{number}",
+                       {"state": "closed", "state_reason": "not_planned"})
+
     def installed_repos(self) -> list[str]:
         """Every repo the App is installed on."""
         return self._auth.installed_repos()
