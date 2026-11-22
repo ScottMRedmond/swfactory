@@ -4,10 +4,13 @@
 The same rules decide what `orchestrator.run_once` dispatches, what each
 held-back run's status line says, and what `factory status` shows:
 
-- per-repo holds (`enabled: false`, and later `claude_auth`) hold one repo's
-  rows, which then don't take a free slot;
-- the manual pause (`factory pause`), then the daily cap, then the usage pause
-  (or usage unknown) hold the rest of the queue;
+- per-repo holds (`enrolment.held`: not enrolled, `enabled: false`, or Claude
+  rejecting the repo's token) hold one repo's rows, which then don't take a
+  free slot;
+- the manual pause (`factory pause`), the `contract_mismatch` pause (lifted
+  by restarting the orchestrator, see `factory.attempts`), the back-off after
+  the runner refused a run, the daily cap, then the usage pause (or usage
+  unknown) hold the rest of the queue;
 - the rest wait for one of `max_in_flight` slots.
 
 `Limits` is part of the global config, `orchestrator.Settings.limits`; a repo
@@ -19,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from factory import state
+from factory import attempts, loop, state
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,8 @@ KIND_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 PAUSED = "factory paused"
 DAILY_CAP = "daily cap reached"
 USAGE_UNKNOWN = "Claude usage unknown"
+CONTRACT_MISMATCH = "dispatching paused: the runner rejected the contract version"
+REFUSED = "the runner refused a run"
 NEXT = "next to dispatch"
 NO_SLOT = "waiting for a free slot"
 
@@ -143,13 +148,21 @@ def usage_hold(reading: state.UsageReading | None, limits: Limits, now: datetime
     return None
 
 
-def global_hold(conn: sqlite3.Connection, limits: Limits, now: datetime) -> str | None:
-    """Why nothing is dispatched at all, or None."""
+def global_hold(
+    conn: sqlite3.Connection, limits: Limits, now: datetime, *, usage: bool = True
+) -> str | None:
+    """Why nothing is dispatched at all, or None. `usage=False` leaves the
+    usage reading out (dispatching reads usage only once the rest allow it)."""
     if state.is_paused(conn):
         return PAUSED
+    if attempts.dispatch_paused(conn):
+        return CONTRACT_MISMATCH
+    refused = loop.refused_until(conn, now)
+    if refused is not None:
+        return f"{REFUSED}, next try about {_about(refused, now)}"
     if daily_count(conn, now) >= limits.daily_cap:
         return DAILY_CAP
-    return usage_hold(state.latest_usage(conn), limits, now)
+    return usage_hold(state.latest_usage(conn), limits, now) if usage else None
 
 
 def queue_holds(

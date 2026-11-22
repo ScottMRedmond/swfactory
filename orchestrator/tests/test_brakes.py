@@ -372,3 +372,53 @@ def test_status_shows_a_disabled_repos_run_as_held(conn, fake, path, github, run
     lines = out[out.index("queue:"):].splitlines()
     assert lines[2].endswith("`enabled: false` in `.factory/config.yml`")
     assert lines[3].endswith("next to dispatch")
+
+
+# --- holds from failures that aren't attempts (factory.attempts) ---
+
+
+def test_a_claude_auth_hold_is_a_per_repo_hold_and_takes_no_slot(conn, fake, github, runner, reader):
+    state.open_problem(conn, "claude_auth", "token rejected", repo=REPO)
+    held = queue(conn)
+    other = queue(conn, repo=OTHER)
+
+    run_once(conn, github, runner, orchestrator.Settings(limits=Limits(max_in_flight=1)))
+
+    assert loop.get_run(conn, held)["status"] == "queued"
+    assert loop.get_run(conn, other)["status"] == "dispatched"
+    assert status_line(fake).startswith("- `explore` 1/2: queued: Claude rejected this repo's token")
+
+
+def test_resume_doesnt_lift_a_contract_mismatch_pause(conn, fake, path, github, runner, reader, capsys):
+    state.open_problem(conn, "contract_mismatch", "runner rejected the contract version")
+    cli_run(path, "pause")
+    capsys.readouterr()
+
+    assert cli_run(path, "resume") == 0
+    assert "contract_mismatch" in capsys.readouterr().out
+    queue(conn)
+    run_once(conn, github, runner)
+
+    assert statuses(conn) == ["queued"]
+    assert reader.calls == 0
+    assert status_line(fake).startswith(
+        "- `explore` 1/2: queued: dispatching paused: the runner rejected the contract version")
+    cli_run(path, "status")
+    assert "paused: yes (contract_mismatch)" in capsys.readouterr().out
+
+
+def test_after_a_refusal_dispatching_waits_and_says_why(conn, fake, github, runner, reader):
+    state.set_runner_refused_at(conn, ago(minutes=5))
+    queue(conn)
+
+    run_once(conn, github, runner)
+
+    assert statuses(conn) == ["queued"]
+    assert reader.calls == 0  # no usage reading while nothing can go
+    assert status_line(fake).startswith(
+        "- `explore` 1/2: queued: the runner refused a run, next try about ")
+
+    state.set_runner_refused_at(conn, ago(minutes=16))
+    run_once(conn, github, runner)
+
+    assert statuses(conn) == ["dispatched"]

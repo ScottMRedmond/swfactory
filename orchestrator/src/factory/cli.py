@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, cancel, db, doctor, enrolment, logs, pause, serve, state, stats
+from factory import attempts, brakes, cancel, db, doctor, enrolment, logs, pause, serve, state, stats
 from factory.orchestrator import Settings
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
@@ -144,7 +144,9 @@ def _usage_line(reading: state.UsageReading | None, now: datetime) -> str:
 def _status(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     now = datetime.now(UTC)
     limits = Settings().limits
-    print(f"paused: {'yes' if state.is_paused(conn) else 'no'}")
+    paused = [why for why, on in [("factory pause", state.is_paused(conn)),
+                                   ("contract_mismatch", attempts.dispatch_paused(conn))] if on]
+    print(f"paused: {'yes (' + ', '.join(paused) + ')' if paused else 'no'}")
     print(_usage_line(state.latest_usage(conn), now))
     today = brakes.daily_count(conn, now)
     cap = " (cap reached)" if today >= limits.daily_cap else ""

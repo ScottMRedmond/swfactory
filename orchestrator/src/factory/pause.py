@@ -4,6 +4,10 @@ all repos (orchestrator.md#limits-and-brakes).
 The flag lives in SQLite, so it survives a restart. Like `factory cancel`, the
 CLI only writes it; the orchestrator reads it on its next loop, and carries on
 polling, collecting, cancelling and posting while paused.
+
+The manual pause is separate from the `contract_mismatch` pause
+(`factory.attempts`), which only a restart of the orchestrator lifts, after
+redeploying: `factory resume` doesn't lift it, and says so.
 """
 
 import argparse
@@ -11,7 +15,7 @@ import sqlite3
 import sys
 from contextlib import closing
 
-from factory import db, state
+from factory import attempts, db, state
 
 
 def add_parser(commands: argparse._SubParsersAction) -> None:
@@ -33,8 +37,12 @@ def run(args: argparse.Namespace) -> int:
                   "start the orchestrator to migrate it", file=sys.stderr)
             return 1
         state.set_paused(conn, paused)
+        mismatch = attempts.dispatch_paused(conn)
     if paused:
         print("factory paused: nothing new is dispatched; runs in flight carry on")
+    elif mismatch:
+        print("factory resumed, but dispatching stays paused for a contract_mismatch: "
+              "redeploy the orchestrator and restart it to lift that")
     else:
         print("factory resumed: queued runs are dispatched on the next loop")
     return 0

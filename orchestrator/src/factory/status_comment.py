@@ -19,13 +19,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import brakes
+from factory.attempts import MAX_ATTEMPTS
 from factory.github import GitHub, GitHubError
 from factory.tickets import STATUS_MARK
 
 log = logging.getLogger(__name__)
 
-# At most this many attempts per ticket per task (orchestrator.md#limits-and-brakes).
-MAX_ATTEMPTS = 2
 
 
 # A spec's workflow kind, whose `pr` is the spec PR (orchestrator.md#implement-spec).

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import brakes, bundles, loop, status_comment, triggers, usage, workflows
+from factory import attempts, brakes, bundles, loop, status_comment, triggers, usage, workflows
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -336,55 +336,46 @@ def run_once(
 
     `poller` holds the polling state between passes; without one, every repo
     gets a full scan. A repo whose calls fail backs off; the others carry on.
-    Queued runs of a repo with `enabled: false` (or no longer enrolled) wait,
-    and so does the whole queue while a brake is on (`factory.brakes`):
-    polling, cancelling, collecting and posting carry on. With a poller, a
-    startup or wake-up pass also takes a fresh usage reading.
+    Queued runs of a repo with `enabled: false` (or no longer enrolled), or
+    held for `claude_auth`, wait, and so does the whole queue while a brake
+    is on (`factory.brakes`: manual pause, `contract_mismatch`, a runner
+    refusal, the daily cap, usage): polling, cancelling, collecting and posting
+    carry on. With a poller, a startup or wake-up pass also takes a fresh
+    usage reading.
     """
     woke = (poller or Poller()).poll_all(conn, github, settings)
     held = enrolments.held(conn)
     ctx = workflows.Context(conn, github, runner, settings)
-    loop.cancel_requested(conn, runner)
-    loop.collect(conn, runner, check=_bundle_check(github, settings))
-    _dispatch(conn, runner, settings.limits, held, fresh_usage=woke and poller is not None,
-              prepare=_try_later(lambda row: workflows.prepare(ctx, row)))
+    if woke and poller is not None:
+        usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
+    loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
+              check=_bundle_check(github, settings),
+              prepare=_try_later(lambda row: workflows.prepare(ctx, row)),
+              gate=lambda now: _gate(conn, settings.limits, held, now))
     handle_finished(conn, github, runner, settings)
     status_comment.sync(conn, github, held=held, limits=settings.limits)
 
 
-def _dispatch(
-    conn: sqlite3.Connection,
-    runner: Runner,
-    limits: brakes.Limits,
-    held: dict[str, str],
-    *,
-    fresh_usage: bool,
-    prepare: loop.Prepare,
-) -> None:
-    """Dispatch what the brakes allow (see `factory.brakes`).
+def _gate(
+    conn: sqlite3.Connection, limits: brakes.Limits, held: dict[str, str], now: datetime
+) -> int | None:
+    """How many rows the brakes let this pass dispatch (the daily cap's
+    remainder), or None for none (see `factory.brakes`).
 
-    The usage reading is taken just before dispatching, only when something
-    could be dispatched (the factory isn't paused, the cap isn't reached, a
-    slot is free and a row of a repo that isn't held is queued), and reused
-    for 5 minutes. `fresh_usage` takes one regardless, on startup and waking.
+    The usage reading is taken here, just before dispatching, and only when
+    something could be dispatched: no other brake is on, a slot is free and a
+    row of a repo that isn't held is queued. A reading is reused for 5 minutes.
     """
-    now = datetime.now(UTC)
-    if fresh_usage:
-        usage.refresh(conn, limits, now, force=True)
-    if db_state.is_paused(conn):
-        return
-    cap_left = limits.daily_cap - brakes.daily_count(conn, now)
-    if cap_left <= 0:
-        return
+    if brakes.global_hold(conn, limits, now, usage=False) is not None:
+        return None
     in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
     waiting = conn.execute("SELECT DISTINCT repo FROM runs WHERE status = 'queued'").fetchall()
     if in_flight >= limits.max_in_flight or all(r["repo"] in held for r in waiting):
-        return
+        return None
     usage.refresh(conn, limits, now)
     if brakes.usage_hold(db_state.latest_usage(conn), limits, now) is not None:
-        return
-    loop.dispatch(conn, runner, limit=limits.max_in_flight, held=held, max_new=cap_left,
-                  prepare=prepare)
+        return None
+    return limits.daily_cap - brakes.daily_count(conn, now)
 
 
 def _try_later[**P, R](f: Callable[P, R]) -> Callable[P, R]:
@@ -455,6 +446,7 @@ def serve(
     enrolments are used, and it's tried again on the next pass.
     """
     log.info("serving, polling every %ss", settings.poll_seconds)
+    attempts.lift_holds(conn)
     refreshed_at: float | None = None
     poller = Poller(clock)
     while True:

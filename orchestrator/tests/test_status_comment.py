@@ -148,8 +148,9 @@ def test_a_failed_run_says_why(conn, github, repo, runner, settings):
     finish(conn, runner, run, explore_result(run["id"], "explore.valid-failed.json"))
     orchestrator.run_once(conn, github, runner, settings)
 
-    [line] = run_lines(issue)
+    line, retry = run_lines(issue)
     assert line.startswith("- `explore` 1/2: failed: agent_timeout · <1 min · [log](")
+    assert retry.startswith("- `explore` 2/2: ")
 
 
 def test_nothing_is_edited_when_nothing_changed(conn, fake, github, repo, runner, settings):
@@ -168,15 +169,20 @@ def test_a_later_trigger_adds_a_line_to_the_same_comment(conn, github, repo, run
     first = only_run(conn)
     finish(conn, runner, first, explore_result(first["id"], "explore.valid-failed.json"))
     orchestrator.run_once(conn, github, runner, settings)
+    orchestrator.run_once(conn, github, runner, settings)  # dispatches the retry
+    retry = conn.execute("SELECT * FROM runs WHERE retry_of = ?", (first["id"],)).fetchone()
+    finish(conn, runner, retry, explore_result(retry["id"], "explore.valid-failed.json"))
+    orchestrator.run_once(conn, github, runner, settings)  # gives up: agent:blocked
 
     issue.label("agent:explore", by="alice")
     orchestrator.run_once(conn, github, runner, settings)
 
     lines = run_lines(issue)
-    assert len(lines) == 2
+    assert len(lines) == 3
     assert lines[0].startswith("- `explore` 1/2: failed: agent_timeout")
-    assert lines[1].startswith("- `explore` 1/2: running")
-    assert lines[1].endswith(f"run {first['id'] + 1}")
+    assert lines[1].startswith("- `explore` 2/2: failed: agent_timeout")
+    assert lines[2].startswith("- `explore` 1/2: running")
+    assert lines[2].endswith(f"run {retry['id'] + 1}")
 
 
 @pytest.mark.parametrize("brake, why", [
@@ -241,7 +247,7 @@ def test_a_deleted_status_comment_is_made_again(conn, github, repo, runner, sett
     finish(conn, runner, run, explore_result(run["id"], "explore.valid-failed.json"))
     orchestrator.run_once(conn, github, runner, settings)
 
-    [line] = run_lines(issue)
+    line, _retry = run_lines(issue)
     assert "failed: agent_timeout" in line
 
 
