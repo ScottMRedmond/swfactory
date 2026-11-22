@@ -10,7 +10,7 @@ On the family Mac mini (M2, 24 GB), which is on most of the time.
 
 - It runs under a dedicated `factory` macOS user, so other non-admin family accounts can't read its secrets.
 - launchd starts it at boot and restarts it when it crashes.
-- The Mac mini may sleep. Runs happen on Actions, so a run in flight keeps going and its artifact waits; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
+- The Mac mini may sleep. Runs happen on the runner, not the Mac mini, so a run in flight keeps going and its files wait on the runner; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
 - It is managed from the development laptop over SSH, with Tailscale if you need access from away from home.
 - Its state is backed up with Time Machine or a nightly copy.
 
@@ -20,11 +20,11 @@ The orchestrator is **one process and one SQLite file**, so moving it to a VM or
 
 SQLite holds two tables.
 
-- **`runs`** is the only queue for every task in every repo. **One row is one dispatch**: a retry is a new row, so every branch, Actions run and `result.json` maps to exactly one row and nothing is overwritten. Each row has `id, repo, task, ticket, workflow_id, attempt, retry_of, triggered_by, status, outcome, actions_run_id, dispatch, result, created_at, dispatched_at, finished_at`.
+- **`runs`** is the only queue for every task in every repo. **One row is one dispatch**: a retry is a new row, so every branch, runner run and `result.json` maps to exactly one row and nothing is overwritten. Each row has `id, repo, task, ticket, workflow_id, attempt, retry_of, triggered_by, status, outcome, runner_run_id, dispatch, result, created_at, dispatched_at, finished_at`.
   - `ticket` is an opaque string (`"123"` today), not an issue number, here and in `dispatch.schema.json`, so a different tracker's ids fit without a schema change.
   - `status` is the lifecycle: `queued` → `dispatched` → `done`. `outcome` is how a `done` row ended: the contract's `succeeded` or `failed`, or one only the orchestrator can tell: `invalid` (the result failed validation), `timed_out`, `cancelled` or `superseded` (e.g. a review whose branch moved).
   - `triggered_by` is the login of the human who added the trigger label, read from the issue's events when the trigger is found. A chained run copies it from the run that queued it.
-  - `dispatch` holds the dispatch inputs (minus the token) and `result` holds `result.json`, both as JSON. Rows are kept forever: a few KB each, so "why did run 412 do that?" can be answered from `factory runs` alone, after the Actions logs expire. The git bundle is used once and not kept, and screenshots stay on Actions as long as the artifact (7 days, see below).
+  - `dispatch` holds the dispatch inputs (minus the token) and `result` holds `result.json`, both as JSON. Rows are kept forever: a few KB each, so "why did run 412 do that?" can be answered from `factory runs` alone, after the runner's logs expire. The git bundle is used once and not kept, and screenshots stay on the runner as long as it keeps the run's files (7 days on Actions, see below).
 - **`workflows`** holds what belongs to a [workflow](#workflows) rather than to one run: `id, repo, kind, subject, branch, pr, status, spec_hash`. For implement-spec that's the spec, the integration branch, the spec PR, and a hash of the spec's body when it was decomposed. For implement-ticket it's the ticket and its PR. The *queue* state (which tickets are blocked or built) stays in the issues; this table holds only what GitHub can't answer cheaply.
 
 A dispatch loop picks the oldest queued run as long as fewer runs are in flight than the limits allow. A retry is a new row, so it goes to the back of the queue.
@@ -35,25 +35,41 @@ A dispatch loop picks the oldest queued run as long as fewer runs are in flight 
 
 ## Dispatching and collecting
 
-The orchestrator dispatches with `return_run_details: true`, which makes the API return the Actions run it created (since February 2026; confirm the response field's name in the first spike), and stores it as `actions_run_id`. `run.yml`'s `run-name` includes the factory run id, so a human browsing Actions can match runs to rows. On startup and on each poll, the orchestrator looks up every `dispatched` row, always asking Actions for the run's state first:
+The orchestrator talks to runners only through the **Runner interface** (see [Keeping the runner swappable](software-factory.md#runners)). It never calls a runner's own APIs or builds its URLs. The interface does five things:
 
-- If the Actions run has finished, it collects the artifact, however late. After a sleep, many runs are past 60 minutes and finished; they are collected normally.
-- If the run is missing, or finished without an artifact, the outcome is `failed`. `run.yml` uploads with `retention-days: 7`, so a Mac mini asleep for more than a week finds the artifact gone, and the normal attempts rule retries it. The short retention keeps old bundles and transcripts from piling up in public repos.
-- Only if the run is *still running* 15 minutes past its task's timeout (for queueing and upload; see [Limits and brakes](#limits-and-brakes)), it cancels the run and records `timed_out`. `run.yml` also sets the job's `timeout-minutes` to the smaller of the dispatch's `timeout_minutes` and 60, so Actions enforces the limit even while the orchestrator is down. The cap guards against a human with write access starting the caller workflow by hand with a huge number. The limit lives in one place, the orchestrator's config. Confirm in the first spike that `timeout-minutes` accepts an expression (`${{ fromJSON(inputs.dispatch).timeout_minutes }}`); if it doesn't, `run.yml` keeps its own table of tasks and timeouts.
+- **dispatch** a run and return the runner's own id for it, stored as `runner_run_id`
+- report a run's **state**: running, finished, or missing (the runner has no such run)
+- hand over a finished run's **files**: `result.json`, the bundle and any screenshots, or nothing if the run left none
+- give a run's **log link**, for status comments and `factory runs`
+- **cancel** a run
 
-Once it has downloaded the artifact, the orchestrator validates `result.json` and the bundle against [the runner contract](software-factory.md#the-runner-contract), then does all the writing to GitHub. An invalid result counts as a failed attempt, and nothing is written to GitHub. If the orchestrator is offline when a run finishes, the artifact waits on Actions (for 7 days) until the orchestrator collects it.
+On startup and on each poll, the orchestrator looks up every `dispatched` row, always asking the runner for the run's state first:
 
-**Failures that aren't attempts.** Three `failure` reasons aren't the ticket's fault, so they don't count as an attempt:
+- If the run has finished, it collects the files, however late. After a sleep, many runs are past 60 minutes and finished; they are collected normally.
+- If the run is missing, or finished without files, the outcome is `failed`. A runner keeps a run's files for a limited time, so a Mac mini asleep longer than that finds them gone, and the normal attempts rule retries it.
+- Only if the run is *still running* 15 minutes past its task's timeout (for queueing and upload; see [Limits and brakes](#limits-and-brakes)), it cancels the run and records `timed_out`. The runner enforces the timeout itself too, so the limit holds even while the orchestrator is down. The limit lives in one place, the orchestrator's config, and travels in the dispatch.
 
-- `contract_mismatch` (`run.yml` got a `contract_version` it doesn't accept): the orchestrator pauses dispatching, logs it once and opens a [factory problem](#observability) issue. The rule is: merge a schema change, then redeploy the orchestrator (see [Deploying](#deploying)).
+Once it has the files, the orchestrator validates `result.json` and the bundle against [the runner contract](software-factory.md#the-runner-contract), then does all the writing to GitHub. An invalid result counts as a failed attempt, and nothing is written to GitHub. If the orchestrator is offline when a run finishes, the files wait on the runner until the orchestrator collects them.
+
+**On Actions (v1).** The Actions runner implements the interface like this:
+
+- **Dispatch** uses `workflow_dispatch` with `return_run_details: true`, which makes the API return the Actions run it created (since February 2026; confirm the response field's name in the first spike). That run's id is the `runner_run_id`. `run.yml`'s `run-name` includes the factory run id, so a human browsing Actions can match runs to rows.
+- **Files** are the run's artifact. `run.yml` uploads with `retention-days: 7`, which keeps old bundles and transcripts from piling up in public repos.
+- **The log link** is the Actions run's page.
+- **Timeouts:** `run.yml` sets the job's `timeout-minutes` to the smaller of the dispatch's `timeout_minutes` and 60. The cap guards against a human with write access starting the caller workflow by hand with a huge number. Confirm in the first spike that `timeout-minutes` accepts an expression (`${{ fromJSON(inputs.dispatch).timeout_minutes }}`); if it doesn't, `run.yml` keeps its own table of tasks and timeouts.
+
+**Failures that aren't attempts.** Three `failure` reasons, and an unreachable runner, aren't the ticket's fault, so they don't count as an attempt:
+
+- `contract_mismatch` (the runner got a `contract_version` it doesn't accept): the orchestrator pauses dispatching, logs it once and opens a [factory problem](#observability) issue. The rule is: merge a schema change, then redeploy the orchestrator (see [Deploying](#deploying)).
 - `claude_auth` (Claude rejected the token: expired, revoked, or the secret is missing): the orchestrator holds dispatches **for that repo** and opens a [factory problem](#observability) naming it, rather than retrying innocent tickets into `agent:blocked`.
 - `usage_limit` (the run hit the Claude usage limit partway through): the orchestrator queues the run again behind the [usage pause](#limits-and-brakes).
+- **Runner unavailable** (the runner can't be reached or refuses a dispatch, whatever the cause: an Actions outage, a rejected `workflow_dispatch`, a runner machine that's switched off): a run that wasn't dispatched stays `queued`, and a `dispatched` run stays as it is until the runner answers. This is different from a *missing* run, where the runner answers that it has no such run. If the runner stays unavailable for 30 minutes, the orchestrator opens a [factory problem](#observability).
 
 A `result.json` with an unknown version is `invalid`.
 
 ## Cancelling
 
-When a human closes a ticket, spec or PR that has active rows, the orchestrator marks its `queued` rows `cancelled`, cancels its `dispatched` Actions runs and discards their results, and, for a spec, sets its `workflows` row to `cancelled`. The poll checks whether each issue with active rows is still open. Removing a trigger label doesn't cancel anything, because the orchestrator removes it itself once the run is queued (see [Triggers](#triggers)).
+When a human closes a ticket, spec or PR that has active rows, the orchestrator marks its `queued` rows `cancelled`, cancels its `dispatched` runs on the runner and discards their results, and, for a spec, sets its `workflows` row to `cancelled`. The poll checks whether each issue with active rows is still open. Removing a trigger label doesn't cancel anything, because the orchestrator removes it itself once the run is queued (see [Triggers](#triggers)).
 
 `factory cancel <run>` cancels one in-flight run by hand (see [Limits and brakes](#limits-and-brakes)).
 
@@ -85,7 +101,7 @@ Before each dispatch, the orchestrator reads the Claude subscription's usage wit
 
 ## Identity
 
-The orchestrator acts as a **GitHub App**, which gives it a bot identity. The App is installed on each enrolled repo, with `actions: write` so it can dispatch runs there.
+The orchestrator acts as a **GitHub App**, which gives it a bot identity. The App is installed on each enrolled repo, with `actions: write` so it can dispatch runs there on the Actions runner (v1).
 
 - The App needs `actions`, `issues`, `pull_requests` and `contents` write: to dispatch runs, set labels and comment, open PRs and mark them ready, and push branches. It has no `workflows` permission, so not even the orchestrator can change `.github/workflows/`.
 - The App's token never reaches a runner. A run gets only its own `GITHUB_TOKEN`, with `contents: read`.
@@ -139,7 +155,7 @@ What the orchestrator does after a verdict can depend on the [workflow](#workflo
 | `built` | Depends on the workflow: [implement-ticket](#implement-ticket) opens a PR for the ticket, and [implement-spec](#implement-spec) lands the commits on the spec's integration branch |
 | `needs-a-human` | Pushes nothing and creates no branch. Posts the comment on the ticket, labels it `needs-a-human`, and doesn't retry |
 
-- **`needs-a-human` pushes nothing.** Any commits in the bundle stay in the Actions artifact (7 days) but aren't pushed, not even to a work-in-progress branch: a partial branch tempts a human to finish what the agent said was the wrong thing to build, and the comment saying why it stopped is the useful part.
+- **`needs-a-human` pushes nothing.** Any commits in the bundle stay in the run's files on the runner (7 days on Actions) but aren't pushed, not even to a work-in-progress branch: a partial branch tempts a human to finish what the agent said was the wrong thing to build, and the comment saying why it stopped is the useful part.
 - **Branch names** include the run id, so a new run never collides with an old branch, and the orchestrator never force-pushes. The `runs` table links ticket, run and branch.
 - **No tests changed:** if a `built` bundle changes nothing under the repo's `test_paths`, the orchestrator adds "⚠️ no test files changed" to the PR footer, or the landing comment for a spec ticket. It's a flag, not an invalid result, because docs and config changes have no tests. Without `test_paths`, the line is skipped.
 - **The ticket changed mid-run:** implement builds from `ticket.md` as rendered at dispatch. If the ticket is edited, or gets a comment from someone with write access, while the run is going, the result is still used, with a footer line: "the ticket changed after this run started". The edit may be a typo fix, so nothing is cancelled.
@@ -251,7 +267,7 @@ sequenceDiagram
         O->>T: Read tickets, pick the lowest-numbered buildable one
         O->>R: Dispatch implement (ticket, base factory/spec-n)
         R->>G: Check out factory/spec-n (read-only token)
-        R-->>O: Artifact: git bundle + result.json
+        R-->>O: Files: git bundle + result.json
         alt built
             O->>G: git merge, push factory/spec-n
             O->>T: Label the ticket agent:built, post its pr_body
@@ -270,7 +286,7 @@ sequenceDiagram
 
     O->>R: Dispatch review (spec PR, spec + all acceptance criteria)
     R->>G: Check out the PR head (read-only token)
-    R-->>O: Artifact: verdicts, comments, fix bundle
+    R-->>O: Files: verdicts, comments, fix bundle
     O->>G: Push fixes, post the review, mark the PR ready
     opt changes-requested
         O->>G: Label the PR needs-a-human
@@ -358,7 +374,7 @@ Brakes:
 
 You see the factory in three places: on GitHub, in the issues it opens about itself, and through a CLI on the Mac mini.
 
-**Status comment.** Each issue or PR the factory works on gets **one** status comment, marked `<!-- factory:status -->`, created when its first run is queued and edited in place from then on. It's never deleted. It has one line per run, newest last: the task, the attempt (`2/2`), the state, the reason it's held back or failed (`queued: factory paused`, `queued: daily cap reached`, `check_failed`, `timed_out`, …), how long it ran, and links to the Actions run and the factory run id (for `factory runs 412`). A later trigger on the same issue adds a line to the same comment. On a spec issue it holds the spec's own runs (spec explore and auto-tickets) and a line linking the spec PR, whose progress list tracks the tickets. Editing a comment notifies nobody, so the status comment is for looking, not for alerting.
+**Status comment.** Each issue or PR the factory works on gets **one** status comment, marked `<!-- factory:status -->`, created when its first run is queued and edited in place from then on. It's never deleted. It has one line per run, newest last: the task, the attempt (`2/2`), the state, the reason it's held back or failed (`queued: factory paused`, `queued: daily cap reached`, `check_failed`, `timed_out`, …), how long it ran, and links to the run's log (from the runner) and the factory run id (for `factory runs 412`). A later trigger on the same issue adds a line to the same comment. On a spec issue it holds the spec's own runs (spec explore and auto-tickets) and a line linking the spec PR, whose progress list tracks the tickets. Editing a comment notifies nobody, so the status comment is for looking, not for alerting.
 
 **Notices.** A notice is a **new** comment, marked `<!-- factory:notice -->`, posted only when a human has to act or decide. It **@mentions `triggered_by`** (or, for a rejected label, whoever added it), so GitHub's own notifications (email or the mobile app) are the alert channel. Notices go out when:
 
@@ -376,6 +392,7 @@ Success stays quiet, apart from the review request when a PR goes ready. Status 
 - usage can't be read for 15 minutes (the factory has failed closed)
 - a `contract_mismatch` pause, at once
 - a repo's polls failing for 30 minutes
+- the runner unavailable for 30 minutes
 - Claude auth failing on a repo (`claude_auth`), at once
 - an enrolment that fails its schema
 - an App installed without an enrolment, or the other way round, found on the 10-minute refresh
@@ -387,7 +404,7 @@ The daily cap and a usage pause never open one: they're the factory working as d
 **The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `factory` user (password login off), e.g. `ssh factory@macmini factory status`, from a phone too through Tailscale.
 
 - `factory status`: whether the factory is paused, the latest usage reading and its age, today's count against the cap, runs in flight, the queue (oldest first, with why each is held), the last successful poll per repo, and open factory problems.
-- `factory runs`: the last 20 rows, filtered with `--repo`, `--ticket`, `--task`, `--outcome` and `--since`, or `--json`. `factory runs <id>` shows one row in full: dispatch, result, the check output's tail, the retry chain, and the Actions link.
+- `factory runs`: the last 20 rows, filtered with `--repo`, `--ticket`, `--task`, `--outcome` and `--since`, or `--json`. `factory runs <id>` shows one row in full: dispatch, result, the check output's tail, the retry chain, and the log link.
 - `factory stats [--since 30d]`: per task and per repo, the run count, outcomes and failure reasons, median and p90 duration, how many runs came within 10% of their timeout, and the share of tickets that needed a second attempt. It's computed from `runs` on demand, with no metrics store, and it's what the timeouts, models and thresholds are tuned with.
 - `factory rules`: every review's `missing_rules` across runs, grouped by repo, from `runs.result`. It's what the retro reads.
 - `factory logs [--run N] [--repo R] [--level warn] [--follow]`: the orchestrator's log as readable lines.
@@ -398,7 +415,7 @@ The read commands only read. The three writing commands only write to SQLite, an
 
 **Orchestrator logs.** JSON lines in a log file the orchestrator rotates itself, keeping 30 days. launchd sends stdout and stderr to a separate file, to catch a crash before logging starts. Every line about a run carries `run`, `repo` and `ticket`. Tokens and the App key are never logged, and the `sk-ant-` scan used on posted prose runs on log lines too.
 
-**Retention.** Agent transcripts live in the Actions logs, which last at most 90 days on a public repo; artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
+**Retention.** Agent transcripts live with the runner. On Actions they're in the logs, which last at most 90 days on a public repo, and artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
 
 **Deferred.** A web runs page: status comments, notices, factory problems and the CLI leave nothing that only a page could show. If reading `factory status` without SSH matters later, the orchestrator could rewrite a pinned "Factory status" issue on the factory repo from the same data.
 

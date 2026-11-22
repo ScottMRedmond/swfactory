@@ -81,12 +81,18 @@ The dispatch is visible to anyone who can read the target repo's runs, so it car
 
 - **It removes:** `run.yml` and the caller workflows, `workflow_dispatch` and its size cap, uploading and downloading artifacts, and most of the runner contract. The ticket becomes a function argument, and Sandcastle validates structured output itself.
 - **It costs:**
-  - The orchestrator would have to be TypeScript, not Python.
+  - Sandcastle is a TypeScript library, so a small TypeScript script has to sit between it and the Python orchestrator. The orchestrator runs the script as a subprocess, and they exchange the dispatch and the result as JSON files, as they do with `run.yml` today. Writing the orchestrator in TypeScript would remove the script, but isn't required.
   - You pay a sandbox provider instead of using the Actions allowance.
   - There are no Actions logs, so the factory has to store and link transcripts itself.
   - The Claude token lives on the Mac mini and is passed into the sandbox for each run. The agent still doesn't run on the Mac mini.
 
 v1 keeps Actions, because it costs nothing extra and the logs come free.
+
+**Keeping the runner swappable.** A later runner on our own hardware, such as a dedicated Linux PC, should need a new Runner implementation and nothing else. Three rules keep it that way:
+
+- **The run steps live in a script, not in `run.yml`.** `run.yml` only prepares the job and calls one script with the dispatch (e.g. `run-task.sh dispatch.json`). That script runs the steps above, including the `if: always()` behaviour, so another runner can call the same script.
+- **Nothing outside the Runner knows it's Actions.** The orchestrator asks the Runner for a run's log link and its files (`result.json`, the bundle, screenshots). It never builds an Actions URL, calls the artifacts API or relies on artifact retention itself.
+- **A runner that can't be reached is one general failure.** Whatever the cause (an Actions outage, a refused dispatch, a PC that's switched off), the Runner reports it the same way, and it isn't an attempt.
 
 ## The runner contract
 
