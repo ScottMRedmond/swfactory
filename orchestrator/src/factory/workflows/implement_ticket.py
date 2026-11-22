@@ -164,8 +164,7 @@ def _reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dic
                 _branch_moved(ctx, run, workflow)
                 return
     link = ctx.runner.log_link(repo, run["runner_run_id"])
-    review.post_verdict(ctx.github, repo, pr, run["id"],
-                        review.render_verdict(run["id"], result, link, discarded=discarded))
+    review.publish(ctx.github, repo, pr, run["id"], result, link, discarded=discarded)
     review.finish(ctx.github, repo, pr,
                   needs_a_human=discarded or review.changes_requested(result["output"]),
                   reviewer=run["triggered_by"])

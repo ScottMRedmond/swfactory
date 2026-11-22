@@ -5,8 +5,8 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Every trigger label is checked (`factory.triggers`); explore, and review of a
-factory PR, are queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
+Every trigger label is checked (`factory.triggers`); explore and review are
+queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
 """
 
 import json
@@ -19,8 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import (attempts, brakes, bundles, loop, problems, status_comment, triggers, usage,
-                     workflows)
+from factory import (attempts, brakes, bundles, loop, problems, review, status_comment, triggers,
+                     usage, workflows)
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -28,7 +28,7 @@ from factory.github import GitHub, GitHubError
 from factory.logs import about_run
 from factory.runner import Runner
 from factory.tickets import render_notice
-from factory.workflows import implement_ticket
+from factory.workflows import implement_ticket, review_pr
 
 log = logging.getLogger(__name__)
 
@@ -84,10 +84,10 @@ def handle_triggers(
     `issues` is what a poll found: a full scan's open issues and PRs, or the
     issues and PRs (open or closed) updated since the cursor.
 
-    Explore, and `agent:review` on a PR the factory opened for a ticket, are
-    queued so far; an accepted `agent:implement`, `agent:review` on any other
-    PR, or `agent:implement-spec` is left on its issue for the tickets that build
-    those tasks. The row is inserted first, then the label removed, so a crash
+    Explore and review are queued so far (a review of a PR the factory didn't
+    open is findings-only, and a fork PR gets only a notice); an accepted
+    `agent:implement` or `agent:implement-spec` is left on its issue for the
+    tickets that build those tasks. The row is inserted first, then the label removed, so a crash
     between the two leaves a duplicate trigger rather than a lost one, which
     the next poll removes quietly. A ticket too big to dispatch gets a notice
     instead, and its label is removed too.
@@ -114,10 +114,32 @@ def handle_triggers(
                                            decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
         elif decision.task == "review":
-            # A PR the factory didn't open is left for findings-only review (#14).
-            if implement_ticket.start_review(conn, github, settings, issue, enrolment,
-                                             decision.triggered_by):
-                github.remove_label(repo, issue["number"], decision.label)
+            _start_review(conn, github, settings, issue, enrolment, decision)
+            github.remove_label(repo, issue["number"], decision.label)
+
+
+FORK_NOTICE = ("This pull request comes from a fork, and the factory reviews only pull requests "
+               "from branches of this repo: a review runs the PR's own code (its tests and setup "
+               "scripts) next to the factory's Claude token. So `agent:review` was removed and "
+               "nothing was started.")
+
+
+def _start_review(
+    conn: sqlite3.Connection, github: GitHub, settings: Settings, issue: dict[str, Any],
+    enrolment: Enrolment, decision: triggers.Trigger,
+) -> None:
+    """`agent:review` on a PR: a factory PR is reviewed again in its workflow,
+    any other gets a findings-only review, and a fork PR nothing but a notice."""
+    repo, number = enrolment.repo, issue["number"]
+    if review.is_fork(github.pull(repo, number), repo):
+        who = decision.triggered_by
+        github.post_comment(repo, number,
+                            render_notice(FORK_NOTICE, [who.login] if who else None))
+        log.info("%s#%s is a fork PR: not reviewed", repo, number, extra={"repo": repo})
+        return
+    if not implement_ticket.start_review(conn, github, settings, issue, enrolment,
+                                         decision.triggered_by):
+        review_pr.start(conn, github, settings, issue, enrolment, decision.triggered_by)
 
 
 def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
@@ -425,7 +447,8 @@ def _bundle_check(conn: sqlite3.Connection, github: GitHub, settings: Settings) 
                     verdict=(result.get("output") or {}).get("verdict"),
                     base_sha=dispatch.get("base_sha", ""),
                     pr_base_sha=dispatch.get("pr_base_sha"),
-                    test_paths=(enrolment.config.test_paths or []) if enrolment else [])
+                    test_paths=(enrolment.config.test_paths or []) if enrolment else [],
+                    findings_only=dispatch.get("findings_only") is True)
 
     return check
 
