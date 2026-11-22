@@ -1,0 +1,11 @@
+{
+  "contract_version": 1,
+  "run_id": 400,
+  "task": "smoke",
+  "outcome": "succeeded",
+  "check": {
+    "passed": true,
+    "output_tail": "42 passed in 2.10s\n"
+  },
+  "output": {}
+}

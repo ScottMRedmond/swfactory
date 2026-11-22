@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "run_id": 431,
+  "task": "auto-tickets",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "decomposed",
+    "tickets": []
+  }
+}

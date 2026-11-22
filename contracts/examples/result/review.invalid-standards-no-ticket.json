@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 420,
+  "task": "review",
+  "outcome": "succeeded",
+  "check_before": {"passed": true, "output_tail": "42 passed\n"},
+  "check_after": {"passed": true, "output_tail": "42 passed\n"},
+  "output": {
+    "standards": {"verdict": "no-ticket", "reasoning": "Only spec may say no-ticket."},
+    "spec": {"verdict": "pass", "reasoning": "Does what the ticket asks."},
+    "comments": [],
+    "fixed": []
+  }
+}

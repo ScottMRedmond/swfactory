@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "task": "explore",
+  "outcome": "succeeded",
+  "failure": "agent_error",
+  "output": {
+    "verdict": "easy-call",
+    "summary": "Search should match words whatever their accents.",
+    "findings": "The claim holds.",
+    "plan": ["Fold accents"],
+    "files": ["app/search.py"]
+  }
+}

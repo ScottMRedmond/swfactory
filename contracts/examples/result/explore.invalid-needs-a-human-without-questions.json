@@ -1,0 +1,13 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "task": "explore",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "needs-a-human",
+    "summary": "Search should match words whatever their accents.",
+    "findings": "Folding accents changes results for every user; someone has to decide whether that's wanted.",
+    "plan": [],
+    "files": ["app/search.py"]
+  }
+}
