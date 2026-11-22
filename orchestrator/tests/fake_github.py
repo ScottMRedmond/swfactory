@@ -76,6 +76,13 @@ class Issue:
         self.events.append(data)
         return data
 
+    def label(self, name: str, by: str, at: str = "2026-11-20T10:00:00Z") -> "Issue":
+        """`by` adds the label `name`, recorded as a `labeled` event like GitHub does."""
+        if name not in self.labels:
+            self.labels.append(name)
+        self.add_event("labeled", by, at, label={"name": name, "color": "1d76db"})
+        return self
+
     def json(self, repo: str) -> dict[str, Any]:
         data = {
             "number": self.number,
