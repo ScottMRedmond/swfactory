@@ -219,6 +219,19 @@ class AppAuth:
         return repos
 
 
+CLOSING_ISSUES = """query ClosingIssues($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { closingIssuesReferences(first: 50) { nodes { number } } }
+  }
+}"""
+MARK_READY = """mutation MarkReady($id: ID!) {
+  markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } }
+}"""
+MINIMIZE_COMMENT = """mutation MinimizeComment($id: ID!) {
+  minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } }
+}"""
+
+
 class GitHub:
     """The REST calls the orchestrator makes, each with a token for the repo it touches."""
 
@@ -393,6 +406,51 @@ class GitHub:
             if not found:
                 raise
             return found[0]["number"]
+
+    def pull(self, repo: str, number: int) -> dict[str, Any]:
+        """A PR as the pulls API gives it (`node_id`, `draft`, `head`, `base`, ...)."""
+        return self._call(repo, "GET", f"/pulls/{number}").json()
+
+    def request_review(self, repo: str, number: int, login: str) -> bool:
+        """Ask `login` to review PR `number`. False if GitHub won't (422: e.g.
+        they're not a collaborator, or they opened it)."""
+        try:
+            self._call(repo, "POST", f"/pulls/{number}/requested_reviewers",
+                       {"reviewers": [login]})
+        except GitHubError as e:
+            if e.status != 422:
+                raise
+            return False
+        return True
+
+    def graphql(self, repo: str, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        """A GraphQL call with `repo`'s token; returns `data`. GraphQL reports
+        errors in a 200 answer, which are raised as `GitHubError` too."""
+        response = _send(self._transport, self._auth.token(repo), "POST", f"{API}/graphql",
+                         {"query": query, "variables": variables})
+        data = response.json()
+        if data.get("errors"):
+            messages = "; ".join(e.get("message", "?") for e in data["errors"])
+            raise GitHubError(Request("POST", f"{API}/graphql", {}, None),
+                              Response(422, {}, json.dumps({"message": messages}).encode()))
+        return data["data"]
+
+    def closing_issues(self, repo: str, number: int) -> list[int]:
+        """The issues PR `number` closes when merged (GitHub's closing references)."""
+        owner, name = repo.split("/")
+        data = self.graphql(repo, CLOSING_ISSUES, {"owner": owner, "name": name, "number": number})
+        refs = data["repository"]["pullRequest"]["closingIssuesReferences"]["nodes"]
+        return [n["number"] for n in refs]
+
+    def mark_ready(self, repo: str, number: int) -> None:
+        """Take PR `number` out of draft. A PR that's already ready is fine."""
+        pull = self.pull(repo, number)
+        if pull.get("draft"):
+            self.graphql(repo, MARK_READY, {"id": pull["node_id"]})
+
+    def minimize_comment(self, repo: str, node_id: str) -> None:
+        """Hide a comment as outdated."""
+        self.graphql(repo, MINIMIZE_COMMENT, {"id": node_id})
 
     def git_remote(self, repo: str) -> tuple[str, dict[str, str]]:
         """The repo's URL for git, and the environment that makes git push and
