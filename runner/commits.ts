@@ -17,10 +17,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_DIR } from "./agent";
+import type { TriggeredBy } from "./contract-types";
 
 export const BUNDLE = "branch.bundle";
-
-export type TriggeredBy = { login: string; id: number };
 
 export type Identity = { name: string; email: string };
 

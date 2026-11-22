@@ -22,13 +22,7 @@ export const TICKET = `${AGENT_DIR}/ticket.md`;
 // The dispatch's older open issues (explore, auto-tickets), one "- #N title" line each.
 export const OLDER_ISSUES = `${AGENT_DIR}/older-issues.md`;
 
-export type AgentFailure =
-  | "agent_error"
-  | "agent_timeout"
-  | "no_output"
-  | "invalid_output"
-  | "claude_auth"
-  | "usage_limit";
+import type { AgentFailure } from "./contract-types";
 
 export type AgentOutcome = { output: object } | { failure: AgentFailure; reason: string };
 

@@ -38,56 +38,21 @@ import { parse as parseYaml } from "yaml";
 import {
   AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, takeClaudeToken, type AgentOutcome,
 } from "./agent";
-import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
+import { botIdentity, bundleBranch, openBranch, type Identity } from "./commits";
+import type { Check, Dispatch, Failure, Result, TriggeredBy } from "./contract-types";
 import { loadContracts, type Contract, type Contracts } from "./contract";
-import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
+import { withPreviousAttempt } from "./previous-attempt";
 import { expandIncludes } from "./prompt-includes";
 import { blockersFirst } from "./tasks/auto-tickets/output";
 import * as review from "./tasks/review/review";
 
 const RUNNER = dirname(fileURLToPath(import.meta.url));
 
-type Dispatch = {
-  contract_version: number;
-  run_id: number;
-  repo: string;
-  task: string;
-  base_sha: string;
-  enrolment_sha: string;
-  timeout_minutes: number;
-  // Agent tasks only.
-  ticket_markdown?: string;
-  previous_attempt?: PreviousAttempt;
-  model?: string;
-  branch?: string;
-  triggered_by?: TriggeredBy;
-  older_issues?: { ticket: string; title: string }[];
-  // Review only.
-  pr_number?: number;
-  pr_base_sha?: string;
-  findings_only?: boolean;
-};
-
-type Check = { passed: boolean; output_tail: string };
-
-type Result = {
-  contract_version: number;
-  run_id: number;
-  task: string;
-  outcome: "succeeded" | "failed";
-  failure?: string;
-  check?: Check;
-  check_before?: Check;
-  check_after?: Check;
-  instructions_changed?: true;
-  output?: object;
-};
-
 const WORKSPACE = "/home/agent/workspace";
 
 // Raised when a step fails in a way that has a `failure` reason.
 class RunFailure extends Error {
-  constructor(readonly failure: string, message: string) {
+  constructor(readonly failure: Failure, message: string) {
     super(message);
   }
 }
@@ -111,7 +76,7 @@ const run = (
   };
 };
 
-const mustRun = (failure: string, command: string, args: string[], options: SpawnSyncOptions = {}) => {
+const mustRun = (failure: Failure, command: string, args: string[], options: SpawnSyncOptions = {}) => {
   const result = run(command, args, options);
   if (result.status !== 0) {
     throw new RunFailure(failure, `${command} ${args.join(" ")} failed:\n${result.output}`);
@@ -299,7 +264,7 @@ const runTask = (
     task: dispatch.task,
   };
 
-  let failure: string | undefined;
+  let failure: Failure | undefined;
   let check: Check | undefined;
   let checkBefore: Check | undefined;
   let instructionsChanged = false;

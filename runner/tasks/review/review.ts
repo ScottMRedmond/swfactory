@@ -9,11 +9,10 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AGENT_DIR } from "../../agent";
+import type { Check, Dispatch } from "../../contract-types";
 
 export const PR_BASE_REF = "refs/factory/pr-base";
 export const BRIEF = `${AGENT_DIR}/review.md`;
-
-type Check = { passed: boolean; output_tail: string };
 
 const git = (cwd: string, args: string[], input?: string | Buffer) => {
   const proc = spawnSync("git", ["-C", cwd, ...args], { input, maxBuffer: 256 * 1024 * 1024 });
@@ -71,7 +70,7 @@ export const prepareCheckout = (target: string, prBaseSha: string): boolean => {
 
 // What the agent is told about this review, next to the ticket.
 export const brief = (
-  dispatch: { pr_number?: number; pr_base_sha?: string; branch?: string; findings_only?: boolean },
+  dispatch: Pick<Dispatch, "pr_number" | "pr_base_sha" | "branch" | "findings_only">,
   enrolment: { check: string; test_paths?: string[] },
   checkBefore: Check,
 ): string => {
