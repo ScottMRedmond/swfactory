@@ -43,12 +43,22 @@ WHERE = (
 
 
 @dataclass(frozen=True)
+class Added:
+    """Who last added a label (login and numeric user id), and when (ISO time)."""
+
+    login: str
+    id: int | None
+    at: str
+
+
+@dataclass(frozen=True)
 class Trigger:
-    """An accepted trigger: queue `task` for the issue, then remove `label`."""
+    """An accepted trigger: queue `task` for the issue, then remove `label`.
+    `triggered_by` is None only if the issue's events don't say who added it."""
 
     label: str
     task: str
-    triggered_by: str | None
+    triggered_by: Added | None
 
 
 @dataclass(frozen=True)
@@ -85,10 +95,10 @@ def check(
         return None
     added = adders(github, repo, issue["number"])
     app = github.app_login()
-    by_app = [l for l in labels if added.get(l, ("",))[0] == app]
+    by_app = [l for l in labels if l in added and added[l].login == app]
     if by_app:
         return Rejection(by_app)
-    mention = sorted({added[l][0] for l in labels if l in added})
+    mention = sorted({added[l].login for l in labels if l in added})
 
     def reject(message: str) -> Rejection:
         return Rejection(labels, message, mention)
@@ -119,11 +129,11 @@ def check(
     who = added.get(label)
     if len(active) >= per_issue_concurrency:
         queued_after = [r for r in active if r["task"] == LABELS[label]
-                        and (who is None or _time(who[1]) <= _time(r["created_at"]))]
+                        and (who is None or _time(who.at) <= _time(r["created_at"]))]
         if queued_after:
             return Rejection(labels)
         return reject("A run is already in progress; re-add the label once it finishes.")
-    return Trigger(label, LABELS[label], who[0] if who else None)
+    return Trigger(label, LABELS[label], who)
 
 
 def _time(iso: str) -> datetime:
@@ -162,10 +172,12 @@ def label_names(issue: dict[str, Any]) -> list[str]:
     return [l["name"] if isinstance(l, dict) else l for l in issue.get("labels", [])]
 
 
-def adders(github: GitHub, repo: str, number: int) -> dict[str, tuple[str, str]]:
-    """Who last added each label to the issue, and when: label -> (login, ISO time)."""
-    found: dict[str, tuple[str, str]] = {}
+def adders(github: GitHub, repo: str, number: int) -> dict[str, Added]:
+    """Who last added each label to the issue, by label name."""
+    found: dict[str, Added] = {}
     for event in github.issue_events(repo, number):
         if event.get("event") == "labeled" and event.get("label") and event.get("actor"):
-            found[event["label"]["name"]] = (event["actor"]["login"], event["created_at"])
+            actor = event["actor"]
+            found[event["label"]["name"]] = Added(actor["login"], actor.get("id"),
+                                                  event["created_at"])
     return found

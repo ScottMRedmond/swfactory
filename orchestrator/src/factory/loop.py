@@ -57,15 +57,18 @@ def enqueue(
     attempt: int = 1,
     retry_of: int | None = None,
     triggered_by: str | None = None,
+    triggered_by_id: int | None = None,
 ) -> int:
-    """Queue a run. `dispatch` is the dispatch minus `run_id`, which is the row's id."""
+    """Queue a run. `dispatch` is the dispatch minus `run_id`, which is the row's id.
+    `triggered_by` is a GitHub login and `triggered_by_id` its numeric user id."""
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         run_id = conn.execute(
             """INSERT INTO runs (repo, task, ticket, workflow_id, attempt, retry_of,
-                                 triggered_by, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
-            (repo, task, ticket, workflow_id, attempt, retry_of, triggered_by, _now()),
+                                 triggered_by, triggered_by_id, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
+            (repo, task, ticket, workflow_id, attempt, retry_of, triggered_by, triggered_by_id,
+             _now()),
         ).lastrowid
         conn.execute(
             "UPDATE runs SET dispatch = ? WHERE id = ?",

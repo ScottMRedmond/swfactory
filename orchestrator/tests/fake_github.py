@@ -46,6 +46,14 @@ APP_LOGIN = f"{APP_SLUG}[bot]"
 TOKEN_LIFETIME = 3600
 
 
+_USER_IDS: dict[str, int] = {}
+
+
+def user_id(login: str) -> int:
+    """The numeric GitHub user id the fake gives `login` (stable within a test run)."""
+    return _USER_IDS.setdefault(login, 4_000_000 + len(_USER_IDS))
+
+
 def _iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -71,7 +79,8 @@ class Issue:
 
     def add_event(self, event: str, login: str, created_at: str, **kw) -> dict:
         """An issue event such as `closed` or `reopened`, by `login`."""
-        data = {"id": next(self._ids), "event": event, "actor": {"login": login},
+        data = {"id": next(self._ids), "event": event,
+                "actor": {"login": login, "id": user_id(login)},
                 "created_at": created_at, **kw}
         self.events.append(data)
         return data

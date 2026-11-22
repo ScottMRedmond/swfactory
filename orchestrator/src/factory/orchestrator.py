@@ -108,9 +108,10 @@ def _queue_explore(
     issue: dict[str, Any],
     enrolment: Enrolment,
     settings: Settings,
-    triggered_by: str | None,
+    triggered_by: triggers.Added | None,
 ) -> None:
     ticket = str(issue["number"])
+    login = triggered_by.login if triggered_by else None
     head = github.default_branch_head(repo)
     try:
         dispatch = tickets.fit(
@@ -128,11 +129,12 @@ def _queue_explore(
             tickets.fetch(github, repo, issue),
         )
     except tickets.TooBig as e:
-        github.post_comment(repo, issue["number"], render_too_big_notice(str(e), triggered_by))
+        github.post_comment(repo, issue["number"], render_too_big_notice(str(e), login))
         log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
         return
     run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch,
-                          triggered_by=triggered_by)
+                          triggered_by=login,
+                          triggered_by_id=triggered_by.id if triggered_by else None)
     log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
              extra=about_run(id=run_id, repo=repo, ticket=ticket))
 

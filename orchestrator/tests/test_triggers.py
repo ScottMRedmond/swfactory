@@ -8,7 +8,7 @@ Every trigger label is checked; a rejected one is removed with a notice that
 import json
 
 import pytest
-from fake_github import APP_ID, APP_LOGIN, PRIVATE_KEY, FakeGitHub, enrol
+from fake_github import APP_ID, APP_LOGIN, PRIVATE_KEY, FakeGitHub, enrol, user_id
 
 from factory import db, enrolment, loop, orchestrator
 from factory.github import AppAuth, GitHub
@@ -71,7 +71,17 @@ def test_triggered_by_is_whoever_last_added_the_label(conn, github, repo, settin
     poll(conn, github, settings)
 
     [row] = runs(conn)
-    assert row["triggered_by"] == "alice"
+    assert (row["triggered_by"], row["triggered_by_id"]) == ("alice", user_id("alice"))
+
+
+def test_the_too_big_notice_mentions_triggered_by(conn, github, repo, settings):
+    issue = repo.add_issue(7, "Huge", "B" * 70_000).label("agent:explore", by="alice")
+
+    poll(conn, github, settings)
+
+    assert runs(conn) == []
+    [notice] = notices(issue)
+    assert notice.startswith(NOTICE + "\n@alice This ticket's title and body are too long")
 
 
 def test_a_trigger_label_the_app_added_itself_is_removed_without_a_run(conn, github, repo, settings):
