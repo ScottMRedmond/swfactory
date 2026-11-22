@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from factory import loop
+from factory import loop, tickets
 from factory import state as db_state
 from factory.contract import CONTRACT_VERSION
 from factory.github import GitHub, GitHubError
@@ -42,15 +42,6 @@ class Settings:
     models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
 
 
-def render_ticket(issue: dict[str, Any]) -> str:
-    """The issue as `ticket.md`: its title and body."""
-    body = (issue.get("body") or "").strip()
-    markdown = f"# {issue['title']}\n"
-    if body:
-        markdown += f"\n{body}\n"
-    return markdown
-
-
 def poll(conn: sqlite3.Connection, github: GitHub, repo: str, settings: Settings) -> None:
     """A full scan: look at every open issue and PR in the repo for triggers."""
     handle_triggers(conn, github, repo, github.open_issues(repo), settings)
@@ -70,7 +61,8 @@ def handle_triggers(
 
     The row is inserted first, then the label removed, so a crash between the
     two leaves a duplicate trigger rather than a lost one. A ticket that
-    already has a queued or dispatched explore isn't queued again.
+    already has a queued or dispatched explore isn't queued again. A ticket
+    too big to dispatch gets a notice instead, and its label is removed too.
     """
     for issue in issues:
         if "pull_request" in issue or issue.get("state", "open") != "open":
@@ -80,26 +72,28 @@ def handle_triggers(
         ticket = str(issue["number"])
         if not _active(conn, repo, "explore", ticket):
             head = github.default_branch_head(repo)
-            run_id = loop.enqueue(
-                conn,
-                repo=repo,
-                task="explore",
-                ticket=ticket,
-                dispatch={
-                    "contract_version": CONTRACT_VERSION,
-                    "repo": repo,
-                    "task": "explore",
-                    "ticket": ticket,
-                    "ticket_markdown": render_ticket(issue),
-                    "older_issues": [],
-                    "base_sha": head,
-                    "enrolment_sha": head,
-                    "model": settings.models["explore"],
-                    "timeout_minutes": settings.timeouts["explore"],
-                },
-            )
-            log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
-                     extra=about_run(id=run_id, repo=repo, ticket=ticket))
+            try:
+                dispatch = tickets.fit(
+                    {
+                        "contract_version": CONTRACT_VERSION,
+                        "repo": repo,
+                        "task": "explore",
+                        "ticket": ticket,
+                        "older_issues": tickets.older_issues(github, repo, issue["number"]),
+                        "base_sha": head,
+                        "enrolment_sha": head,
+                        "model": settings.models["explore"],
+                        "timeout_minutes": settings.timeouts["explore"],
+                    },
+                    tickets.fetch(github, repo, issue),
+                )
+            except tickets.TooBig as e:
+                github.post_comment(repo, issue["number"], render_too_big_notice(str(e)))
+                log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
+            else:
+                run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch)
+                log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
+                         extra=about_run(id=run_id, repo=repo, ticket=ticket))
         github.remove_label(repo, issue["number"], EXPLORE_LABEL)
 
 
@@ -138,6 +132,20 @@ def cancel_closed(
             log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"],
                      extra=_about(row))
             loop.request_cancel(conn, row["id"])
+
+
+def render_too_big_notice(reason: str, mention: str | None = None) -> str:
+    """The notice for a ticket whose title and body alone don't fit in a dispatch.
+
+    `mention` (the login that triggered the run) is @mentioned once #9 knows it.
+    """
+    who = f"@{mention} " if mention else ""
+    return (
+        f"{tickets.NOTICE_MARK}\n"
+        f"{who}This ticket's title and body are too long to dispatch ({reason}). "
+        "Please shorten it, for example by moving logs or long examples into a linked "
+        "file or gist, then add the label again.\n"
+    )
 
 
 def _label_names(issue: dict[str, Any]) -> set[str]:
