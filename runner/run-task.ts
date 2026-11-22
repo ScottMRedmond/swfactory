@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { AGENT_DIR, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
+import { AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
 import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
 import { loadContracts, type Contract, type Contracts } from "./contract";
 
@@ -52,6 +52,8 @@ type Dispatch = {
   model?: string;
   branch?: string;
   triggered_by?: TriggeredBy;
+  // Explore and auto-tickets.
+  older_issues?: { ticket: string; title: string }[];
 };
 
 type Check = { passed: boolean; output_tail: string };
@@ -235,6 +237,11 @@ const taskPrompt = (contract: Contract, task: string): string => {
 // minus 5 minutes, so the steps after it still have time to run.
 const agentStep = (contract: Contract, dispatch: Dispatch, container: string): AgentOutcome => {
   if (dispatch.ticket_markdown !== undefined) putFile(container, TICKET, dispatch.ticket_markdown);
+  if (dispatch.older_issues !== undefined) {
+    // One line per issue, newest first, as `- <ticket id>: <title>`.
+    const lines = dispatch.older_issues.map((i) => `- ${i.ticket}: ${i.title.replace(/\s+/g, " ")}\n`);
+    putFile(container, OLDER_ISSUES, lines.join(""));
+  }
   const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
   return runAgent({
     container,

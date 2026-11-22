@@ -17,6 +17,8 @@ import { spawnSync } from "node:child_process";
 export const AGENT_DIR = "/home/agent/factory";
 export const OUTPUT = `${AGENT_DIR}/output.json`;
 export const TICKET = `${AGENT_DIR}/ticket.md`;
+// Explore and auto-tickets: the older open issues from the dispatch.
+export const OLDER_ISSUES = `${AGENT_DIR}/older-issues.md`;
 
 export type AgentFailure =
   | "agent_error"
