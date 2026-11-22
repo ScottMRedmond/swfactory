@@ -122,16 +122,12 @@ def start_review(
     built tickets, crediting whoever added the label. False, doing nothing,
     for any other PR."""
     repo, number = enrolment.repo, pr["number"]
-    workflow = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr = ? ORDER BY id DESC LIMIT 1",
-        (repo, KIND, number)).fetchone()
+    workflow = base.of_pr(conn, repo, KIND, number)
     if workflow is None:
         return False
     mention = [triggered_by.login] if triggered_by else None
     if triggered_by is None or triggered_by.id is None:
-        github.post_comment(repo, number, render_notice(
-            "The PR's events don't say who added `agent:review`, so nothing was started. "
-            "Add it again."))
+        implement_ticket.unknown_reviewer(github, repo, number)
         return True
     if workflow["status"] == base.CANCELLED:
         github.post_comment(repo, number, render_notice(
@@ -142,18 +138,10 @@ def start_review(
         "SELECT * FROM runs WHERE workflow_id = ? AND task = 'auto-tickets' "
         "AND outcome = 'succeeded' ORDER BY id DESC LIMIT 1", (workflow["id"],)).fetchone()
     assert decomposed is not None  # it made the branch the PR is from
-    ctx = Context(conn, github, settings)
-    base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
-    workflow = base.get(conn, workflow["id"])
-    assert workflow is not None
-    if implement_ticket.queue_review(
-            ctx, decomposed, workflow, number, branch=workflow["branch"],
-            pr_base_sha=json.loads(decomposed["dispatch"])["base_sha"],
-            triggered_by=(triggered_by.login, triggered_by.id)) is None:
-        return True
-    for label in base.STALE:
-        github.remove_label(repo, number, label)
-    base.mark_in_progress(github, repo, int(workflow["subject"]))
+    implement_ticket.review_again(
+        Context(conn, github, settings), workflow, decomposed, number, branch=workflow["branch"],
+        pr_base_sha=json.loads(decomposed["dispatch"])["base_sha"],
+        triggered_by=(triggered_by.login, triggered_by.id))
     return True
 
 
@@ -167,25 +155,10 @@ def cancel_closed_prs(
     to start over. The integration branch is kept: nothing built is lost.
     Reopening the PR restarts nothing.
 
-    `issues` is what the poll found, as for `orchestrator.cancel_closed`. A
-    full scan only lists open issues and PRs, so it looks at specs whose PR
-    is missing from it but which are still open: a merged PR closes its spec."""
-    rows = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
-        "AND status IN (?, ?, ?) ORDER BY id",
-        (repo, KIND, base.ACTIVE, base.STOPPED, base.DONE)).fetchall()
-    if full_scan:
-        open_numbers = {i["number"] for i in issues}
-        closed = [w for w in rows
-                  if w["pr"] not in open_numbers and int(w["subject"]) in open_numbers]
-    else:
-        closed_prs = {i["number"] for i in issues
-                      if "pull_request" in i and i.get("state") == "closed"}
-        closed = [w for w in rows if w["pr"] in closed_prs]
-    for workflow in closed:
-        pull = github.pull(repo, workflow["pr"])
-        if pull["state"] != "closed" or pull.get("merged"):
-            continue
+    `issues` and `full_scan` are as for `base.closed_unmerged`."""
+    statuses = (base.ACTIVE, base.STOPPED, base.DONE)
+    for workflow in base.closed_unmerged(conn, github, repo, issues, kind=KIND,
+                                         statuses=statuses, full_scan=full_scan):
         spec = int(workflow["subject"])
         for row in conn.execute(
             "SELECT id FROM runs WHERE workflow_id = ? AND status IN ('queued', 'dispatched')",
@@ -303,7 +276,7 @@ def _land(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[st
     repo, number = run["repo"], int(run["ticket"])
     dispatch = json.loads(run["dispatch"])
     branch = workflow["branch"]
-    store = _store(ctx)
+    store = base.store(ctx)
     checked = implement_ticket.checked_bundle(ctx, store, run, dispatch["base_sha"])
     assert checked is not None  # built always has commits
     issue = ctx.github.get_issue(repo, number)
@@ -550,7 +523,7 @@ def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, 
         # As for a ticket's PR: review looks at the branch as it is when it starts.
         return implement_ticket.prepare(ctx, run, workflow)
     if run["task"] == "implement" and workflow["branch"]:
-        head = _store(ctx).branch_head(run["repo"], workflow["branch"])
+        head = base.store(ctx).branch_head(run["repo"], workflow["branch"])
         if head is None:
             raise bundles.GitError(f"{workflow['branch']} isn't on {run['repo']}")
         return {**dispatch, "base_sha": head}
@@ -922,7 +895,7 @@ def _queue_ticket(
             (workflow["id"],)).fetchone()
         assert started is not None  # spec explore made the branch's workflow go on
         credit = (started["triggered_by"], started["triggered_by_id"])
-    head = _store(ctx).branch_head(repo, workflow["branch"])
+    head = base.store(ctx).branch_head(repo, workflow["branch"])
     if head is None:
         raise bundles.GitError(f"{workflow['branch']} isn't on {repo}")
     try:
@@ -939,10 +912,6 @@ def _queue_ticket(
     log.info("queued implement run %s for %s#%s, a ticket of spec #%s", run_id, repo, number,
              workflow["subject"], extra=about_run(id=run_id, repo=repo, ticket=str(number)))
     return True
-
-
-def _store(ctx: Context) -> bundles.Store:
-    return bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
 
 
 def integration_branch(spec: int | str) -> str:
@@ -1000,7 +969,7 @@ def _create_integration_branch(ctx: Context, run: sqlite3.Row, workflow: sqlite3
     branch = integration_branch(spec)
     base_sha = json.loads(run["dispatch"])["base_sha"]
     try:
-        bundles.Store(ctx.settings.git_dir, ctx.github.git_remote).create_branch(
+        base.store(ctx).create_branch(
             repo, branch, base_sha)
     except bundles.Moved:
         ctx.github.post_comment(repo, spec, render_notice(

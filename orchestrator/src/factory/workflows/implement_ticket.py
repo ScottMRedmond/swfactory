@@ -160,26 +160,9 @@ def cancel_closed_prs(
     ticket if it's still open. Its review's rows are cancelled by
     `orchestrator.cancel_closed`, which runs first.
 
-    `issues` is what the poll found, as for `cancel_closed`. A full scan only
-    lists open issues and PRs, so it looks at workflows whose PR is missing
-    from it but whose ticket is there: a merged PR closes its ticket."""
-    rows = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
-        "AND status IN (?, ?) ORDER BY id",
-        (repo, KIND, base.ACTIVE, base.DONE),
-    ).fetchall()
-    if full_scan:
-        open_numbers = {i["number"] for i in issues}
-        closed = [w for w in rows
-                  if w["pr"] not in open_numbers and int(w["subject"]) in open_numbers]
-    else:
-        closed_prs = {i["number"] for i in issues
-                      if "pull_request" in i and i.get("state") == "closed"}
-        closed = [w for w in rows if w["pr"] in closed_prs]
-    for workflow in closed:
-        pull = github.pull(repo, workflow["pr"])
-        if pull["state"] != "closed" or pull.get("merged"):
-            continue
+    `issues` and `full_scan` are as for `base.closed_unmerged`."""
+    for workflow in base.closed_unmerged(conn, github, repo, issues, kind=KIND,
+                                         statuses=(base.ACTIVE, base.DONE), full_scan=full_scan):
         number = int(workflow["subject"])
         if github.get_issue(repo, number)["state"] == "open":
             last = conn.execute(
@@ -206,10 +189,7 @@ def start_review(
     ticket, review it again in that ticket's workflow (reactivated), against
     the ticket. False, doing nothing, for any other PR."""
     repo, number = enrolment.repo, pr["number"]
-    workflow = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr = ? ORDER BY id DESC LIMIT 1",
-        (repo, KIND, number),
-    ).fetchone()
+    workflow = base.of_pr(conn, repo, KIND, number)
     if workflow is None:
         return False
     head = github.pull(repo, number)["head"]["ref"]
@@ -220,23 +200,39 @@ def start_review(
     if opened is None:
         return False
     if triggered_by is None or triggered_by.id is None:
-        # Review's commits credit whoever asked for it; here no one is known.
-        github.post_comment(repo, number, tickets.render_notice(
-            "The PR's events don't say who added `agent:review`, so nothing was started. "
-            "Add it again."))
+        unknown_reviewer(github, repo, number)
         return True
-    ctx = Context(conn, github, settings)
-    base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
-    workflow = base.get(conn, workflow["id"])
-    assert workflow is not None
-    if queue_review(ctx, opened, workflow, number, branch=head,
-                     pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
-                     triggered_by=(triggered_by.login, triggered_by.id)) is None:
-        return True
-    for label in base.STALE:
-        github.remove_label(repo, number, label)
-    base.mark_in_progress(github, repo, int(workflow["subject"]))
+    review_again(Context(conn, github, settings), workflow, opened, number, branch=head,
+                 pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
+                 triggered_by=(triggered_by.login, triggered_by.id))
     return True
+
+
+def unknown_reviewer(github: GitHub, repo: str, number: int) -> None:
+    """The notice when no one is known to have added `agent:review`: review's
+    commits credit whoever asked for it."""
+    github.post_comment(repo, number, tickets.render_notice(
+        "The PR's events don't say who added `agent:review`, so nothing was started. "
+        "Add it again."))
+
+
+def review_again(
+    ctx: Context, workflow: sqlite3.Row, after: sqlite3.Row, number: int, *, branch: str,
+    pr_base_sha: str, triggered_by: tuple[str, int],
+) -> None:
+    """A human re-added `agent:review` to PR `number`: the workflow is
+    reactivated and the review queued (`queue_review`), the PR's stale status
+    labels come off and its subject is `agent:in-progress`."""
+    base.start(ctx.conn, repo=workflow["repo"], kind=workflow["kind"],
+               subject=workflow["subject"])
+    workflow = base.get(ctx.conn, workflow["id"])
+    assert workflow is not None
+    if queue_review(ctx, after, workflow, number, branch=branch, pr_base_sha=pr_base_sha,
+                    triggered_by=triggered_by) is None:
+        return
+    for label in base.STALE:
+        ctx.github.remove_label(workflow["repo"], number, label)
+    base.mark_in_progress(ctx.github, workflow["repo"], int(workflow["subject"]))
 
 
 def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
@@ -269,7 +265,7 @@ def reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict
     pr = dispatch["pr_number"]
     discarded = result["outcome"] == "failed"
     if not discarded:
-        store = _store(ctx)
+        store = base.store(ctx)
         checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
         if checked is not None:
             try:
@@ -314,13 +310,9 @@ def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, 
     if run["task"] == "review":
         # Review looks at the PR as it is when the run starts, so a human's
         # push while it waited doesn't make its fixes land on a moved branch.
-        head = _store(ctx).branch_head(run["repo"], dispatch["branch"])
+        head = base.store(ctx).branch_head(run["repo"], dispatch["branch"])
         return {**dispatch, "base_sha": head} if head else None
     return None
-
-
-def _store(ctx: Context) -> bundles.Store:
-    return bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
 
 
 def _test_paths(ctx: Context, repo: str) -> list[str]:
@@ -340,7 +332,7 @@ def queue_review(
     login, user = triggered_by or (after["triggered_by"], after["triggered_by_id"])
     enrolment = enrolments.get(ctx.conn, repo)
     assert enrolment is not None  # an unenrolled repo's runs are never handled
-    head = _store(ctx).branch_head(repo, branch)
+    head = base.store(ctx).branch_head(repo, branch)
     if head is None:
         raise bundles.GitError(f"{branch}, PR #{pr}'s branch, isn't on {repo}")
     pr_issue = ctx.github.get_issue(repo, pr)
@@ -391,7 +383,7 @@ def _implemented(
                  extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
         return
     dispatch = json.loads(run["dispatch"])
-    store = bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
+    store = base.store(ctx)
     checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
     assert checked is not None  # built always has commits
     store.push(repo, run["id"], dispatch["branch"])

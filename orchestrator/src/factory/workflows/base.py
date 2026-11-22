@@ -10,6 +10,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from factory import bundles
 from factory.github import GitHub
 from factory.runner import Runner
 
@@ -86,6 +87,47 @@ def start(conn: sqlite3.Connection, *, repo: str, kind: str, subject: str) -> in
 
 def get(conn: sqlite3.Connection, workflow_id: int) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
+
+
+def of_pr(conn: sqlite3.Connection, repo: str, kind: str, pr: int) -> sqlite3.Row | None:
+    """The newest workflow of `kind` whose PR is `pr`."""
+    return conn.execute(
+        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr = ? ORDER BY id DESC LIMIT 1",
+        (repo, kind, pr)).fetchone()
+
+
+def closed_unmerged(
+    conn: sqlite3.Connection, github: GitHub, repo: str, issues: list[dict[str, Any]], *,
+    kind: str, statuses: tuple[str, ...], full_scan: bool,
+) -> list[sqlite3.Row]:
+    """The workflows of `kind` in one of `statuses` whose PR a human closed
+    without merging. `issues` is what the poll found, as for
+    `orchestrator.cancel_closed`. A full scan only lists open issues and PRs,
+    so it looks at workflows whose PR is missing from it but whose subject
+    (ticket or spec) is there: a merged PR closes its subject."""
+    rows = conn.execute(
+        f"SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
+        f"AND status IN ({', '.join('?' * len(statuses))}) ORDER BY id",
+        (repo, kind, *statuses)).fetchall()
+    if full_scan:
+        open_numbers = {i["number"] for i in issues}
+        maybe = [w for w in rows
+                 if w["pr"] not in open_numbers and int(w["subject"]) in open_numbers]
+    else:
+        closed_prs = {i["number"] for i in issues
+                      if "pull_request" in i and i.get("state") == "closed"}
+        maybe = [w for w in rows if w["pr"] in closed_prs]
+    closed = []
+    for workflow in maybe:
+        pull = github.pull(repo, workflow["pr"])
+        if pull["state"] == "closed" and not pull.get("merged"):
+            closed.append(workflow)
+    return closed
+
+
+def store(ctx: Context) -> bundles.Store:
+    """The orchestrator's git store, reaching GitHub as the App."""
+    return bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
 
 
 def mark_in_progress(github: GitHub, repo: str, number: int) -> None:
