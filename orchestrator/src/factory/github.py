@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import jwt
 
@@ -49,12 +49,29 @@ class Response:
 Transport = Callable[[Request], Response]
 
 
+class _TokenStaysHome(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but don't carry the token to another host.
+
+    The artifacts API redirects to pre-signed blob storage; urllib would
+    otherwise forward the Authorization header there.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urlsplit(newurl).netloc != urlsplit(req.full_url).netloc:
+            new.remove_header("Authorization")
+        return new
+
+
+_opener = urllib.request.build_opener(_TokenStaysHome)
+
+
 def urllib_transport(request: Request, timeout: float = 30) -> Response:
     req = urllib.request.Request(
         request.url, data=request.body, headers=request.headers, method=request.method
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _opener.open(req, timeout=timeout) as resp:
             return Response(resp.status, dict(resp.headers.items()), resp.read())
     except urllib.error.HTTPError as e:
         return Response(e.code, dict(e.headers.items()), e.read())
