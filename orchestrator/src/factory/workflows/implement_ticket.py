@@ -47,10 +47,13 @@ def start_explore(
     issue: dict[str, Any],
     enrolment: Enrolment,
     triggered_by: "Added | None",
+    *,
+    kind: str = KIND,
 ) -> int | None:
     """Start (or restart) the ticket's workflow with an explore run: the row is
     queued and the ticket marked in progress. Returns the run id, or None if the ticket is too
-    big to dispatch, when a notice says so and nothing starts."""
+    big to dispatch, when a notice says so and nothing starts. Implement-spec
+    starts the same way, with spec explore (`kind`)."""
     repo, ticket = enrolment.repo, str(issue["number"])
     login = triggered_by.login if triggered_by else None
     try:
@@ -72,7 +75,7 @@ def start_explore(
         github.post_comment(repo, issue["number"], tickets.render_too_big_notice(str(e), login))
         log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
         return None
-    workflow_id = base.start(conn, repo=repo, kind=KIND, subject=ticket)
+    workflow_id = base.start(conn, repo=repo, kind=kind, subject=ticket)
     run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch,
                           workflow_id=workflow_id, triggered_by=login,
                           triggered_by_id=triggered_by.id if triggered_by else None)
@@ -248,7 +251,7 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
             base.end(ctx, workflow, "cancelled", int(run["ticket"]))
     elif attempts.is_bad(run):
         if workflow["status"] == "active":
-            _give_up(ctx, run, workflow)
+            give_up(ctx, run, workflow)
     elif run["task"] == "explore" and run["outcome"] == "succeeded":
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
     elif run["task"] == "implement" and run["outcome"] == "succeeded":
@@ -299,7 +302,7 @@ def _branch_moved(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None
              json.loads(run["dispatch"])["branch"],
              extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
     if attempts.retry(ctx.conn, run) is None:
-        _give_up(ctx, run, workflow)
+        give_up(ctx, run, workflow)
 
 
 def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, Any] | None:
@@ -465,10 +468,13 @@ def _when(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
-def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
+def give_up(
+    ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, again: str | None = None
+) -> None:
     """The ticket ran out of attempts: a notice, `agent:blocked`, and the
     workflow stops. For review they go on the PR, which stays a draft: marking
-    it ready would say someone had read it."""
+    it ready would say someone had read it. `again` is the label that starts
+    over (default: the task's own)."""
     repo, number = run["repo"], int(run["ticket"])
     if run["task"] == "review":
         number = json.loads(run["dispatch"])["pr_number"]
@@ -477,7 +483,8 @@ def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     last = f"[run {run['id']}]({link})" if link else f"run {run['id']}"
     message = (
         f"The factory gave up on `{run['task']}` after {run['attempt']} attempts: the last, "
-        f"{last}, ended `{ended}`. Add `agent:{run['task']}` to try again from attempt 1."
+        f"{last}, ended `{ended}`. Add `{again or 'agent:' + run['task']}` to try again from "
+        "attempt 1."
     )
     ctx.github.post_comment(repo, number, tickets.render_notice(
         message, [run["triggered_by"]] if run["triggered_by"] else None))
@@ -494,40 +501,64 @@ def _explored(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dic
     """Explore's verdict (orchestrator.md#explore)."""
     repo, number = run["repo"], int(run["ticket"])
     verdict = output["verdict"]
-
-    def post(notes: list[str] | None = None) -> None:
-        link = ctx.runner.log_link(repo, run["runner_run_id"])
-        ctx.github.post_comment(repo, number, render_explore_comment(run["id"], output, link, notes))
-        log.info("posted explore findings of run %s on %s#%s (%s)", run["id"], repo, number,
-                 verdict, extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
-
-    if verdict in ("needs-a-human", "waiting"):
-        post()
-        base.end(ctx, workflow, "stopped", number, verdict)
-    elif verdict == "easy-call":
+    if explore_stopped(ctx, run, workflow, output):
+        return
+    if verdict == "easy-call":
         issue = ctx.github.get_issue(repo, number)
         why_not = _why_not_implement(ctx, run, issue)
         if why_not is not None:
-            post([why_not])
+            post_explore(ctx, run, output, [why_not])
             base.end(ctx, workflow, "stopped", number, "needs-a-human")
             return
-        post()
+        post_explore(ctx, run, output)
         _queue_implement(ctx, run, issue)
+    elif verdict == "too-big":
+        post_explore(ctx, run, output, ["Add `agent:implement-spec` to build this as a spec."])
+        base.end(ctx, workflow, "stopped", number, "needs-a-human")
+
+
+def post_explore(
+    ctx: Context, run: sqlite3.Row, output: dict[str, Any], notes: list[str] | None = None,
+    heading: str = "Explore findings",
+) -> None:
+    """Post explore run `run`'s findings on its ticket."""
+    repo, number = run["repo"], int(run["ticket"])
+    link = ctx.runner.log_link(repo, run["runner_run_id"])
+    ctx.github.post_comment(repo, number,
+                            render_explore_comment(run["id"], output, link, notes, heading))
+    log.info("posted explore findings of run %s on %s#%s (%s)", run["id"], repo, number,
+             output["verdict"], extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
+
+
+def explore_stopped(
+    ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[str, Any],
+    heading: str = "Explore findings",
+) -> bool:
+    """The verdicts that stop a workflow at explore, whatever the workflow:
+    `needs-a-human` and `waiting` label the issue, and `duplicate` closes it
+    (or, if the duplicate has been closed since, asks a human). False, doing
+    nothing, for any other verdict."""
+    repo, number = run["repo"], int(run["ticket"])
+    verdict = output["verdict"]
+    if verdict in ("needs-a-human", "waiting"):
+        post_explore(ctx, run, output, heading=heading)
+        base.end(ctx, workflow, "stopped", number, verdict)
     elif verdict == "duplicate":
         duplicate_of = output["duplicate_of"]
         if ctx.github.get_issue(repo, int(duplicate_of))["state"] != "open":
-            post([f"#{duplicate_of} has been closed since, so this ticket was left open: only a "
-                  "human can tell whether its fix covers this one too."])
+            post_explore(ctx, run, output, [
+                f"#{duplicate_of} has been closed since, so this ticket was left open: only a "
+                "human can tell whether its fix covers this one too."], heading)
             base.end(ctx, workflow, "stopped", number, "needs-a-human")
-            return
+            return True
         # The findings first: a reopened duplicate's history is read from the
         # App's explore comment ("### Duplicate of") before the App's close.
-        post()
+        post_explore(ctx, run, output, heading=heading)
         ctx.github.close_as_duplicate(repo, number)
         base.end(ctx, workflow, "stopped", number)
-    elif verdict == "too-big":
-        post(["Add `agent:implement-spec` to build this as a spec."])
-        base.end(ctx, workflow, "stopped", number, "needs-a-human")
+    else:
+        return False
+    return True
 
 
 def _why_not_implement(ctx: Context, run: sqlite3.Row, issue: dict[str, Any]) -> str | None:
@@ -632,10 +663,24 @@ def render_needs_a_human_comment(run_id: int, comment: str, log_link: str) -> st
 
 
 def render_explore_comment(
-    run_id: int, output: dict[str, Any], log_link: str, notes: list[str] | None = None
+    run_id: int, output: dict[str, Any], log_link: str, notes: list[str] | None = None,
+    heading: str = "Explore findings",
 ) -> str:
     """Explore's findings under the factory's own headings, the same every time.
     `notes` are the orchestrator's own lines, put above the footer."""
+    parts = [
+        f"<!-- factory:explore run={run_id} -->\n## {heading}\n",
+        f"**Verdict:** `{output['verdict']}`\n",
+        render_explore_sections(output),
+    ]
+    parts.extend(f"{note}\n" for note in notes or [])
+    parts.append(f"---\nFactory run {run_id} · [runner log]({log_link})\n")
+    return "\n".join(parts)
+
+
+def render_explore_sections(output: dict[str, Any]) -> str:
+    """Explore's findings as `###` sections: summary, findings, plan, files,
+    and questions or the duplicate if it has them."""
 
     def section(heading: str, text: str) -> str:
         return f"### {heading}\n\n{text.strip()}\n"
@@ -646,8 +691,6 @@ def render_explore_comment(
         return "\n".join(f"{i}. {x}" if numbered else f"- {x}" for i, x in enumerate(items, 1))
 
     parts = [
-        f"<!-- factory:explore run={run_id} -->\n## Explore findings\n",
-        f"**Verdict:** `{output['verdict']}`\n",
         section("Summary", output["summary"]),
         section("Findings", output["findings"]),
         section("Plan", listed(output["plan"], numbered=True)),
@@ -657,6 +700,4 @@ def render_explore_comment(
         parts.append(section("Questions", listed(output["questions"], numbered=True)))
     if output.get("duplicate_of"):
         parts.append(section("Duplicate of", f"#{output['duplicate_of']}"))
-    parts.extend(f"{note}\n" for note in notes or [])
-    parts.append(f"---\nFactory run {run_id} · [runner log]({log_link})\n")
     return "\n".join(parts)

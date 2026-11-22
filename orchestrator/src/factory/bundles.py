@@ -126,6 +126,20 @@ class Store:
                 raise Moved(f"{branch} has moved: {e}") from e
             raise
 
+    def create_branch(self, repo: str, branch: str, sha: str) -> None:
+        """Create `branch` at commit `sha` on GitHub, never with force:
+        creating it again at the same commit is a no-op, and a branch that's
+        already elsewhere is refused with `Moved`."""
+        git_dir = self._repo_dir(repo)
+        self._fetch_base(repo, git_dir, sha)
+        url, env = self._remote(repo)
+        try:
+            _git(git_dir, "push", "-q", url, f"{sha}:refs/heads/{branch}", env=env)
+        except GitError as e:
+            if "[rejected]" in e.stderr:
+                raise Moved(f"{branch} already exists elsewhere: {e}") from e
+            raise
+
     def branch_head(self, repo: str, branch: str) -> str | None:
         """The commit at the head of `branch` on GitHub, or None if there's no such branch."""
         url, env = self._remote(repo)
