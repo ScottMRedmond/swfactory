@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from fake_github import APP_ID, PRIVATE_KEY, FakeGitHub
+from git_repos import Remote
 
 from factory import db, enrolment, loop, orchestrator
 from factory.github import AppAuth, GitHub, Response
@@ -26,9 +27,14 @@ def conn(tmp_path):
 
 
 @pytest.fixture
-def fake():
+def remote(tmp_path):
+    return Remote(tmp_path / "github")
+
+
+@pytest.fixture
+def fake(remote):
     fake = FakeGitHub()
-    fake.add_repo(REPO).files[".factory/config.yml"] = "setup: uv sync\ncheck: uv run pytest\n"
+    fake.add_repo(REPO, head_sha=remote.base).files[".factory/config.yml"] = "setup: uv sync\ncheck: uv run pytest\n"
     return fake
 
 
@@ -44,8 +50,9 @@ def spec(repo):
 
 
 @pytest.fixture
-def github(fake):
-    return GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock), fake)
+def github(fake, remote):
+    return GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock), fake,
+                  git_url=lambda repo: remote.url)
 
 
 @pytest.fixture
@@ -54,8 +61,8 @@ def runner():
 
 
 @pytest.fixture
-def settings():
-    return orchestrator.Settings()
+def settings(tmp_path):
+    return orchestrator.Settings(git_dir=tmp_path / "factory-git")
 
 
 @pytest.fixture(autouse=True)
@@ -73,12 +80,12 @@ def decomposed(*tickets):
     return {"verdict": "decomposed", "tickets": list(tickets)}
 
 
-def queue_auto_tickets(conn):
+def queue_auto_tickets(conn, base_sha):
     """An auto-tickets run on the spec, in its implement-spec workflow."""
     workflow_id = base.start(conn, repo=REPO, kind="implement-spec", subject=str(SPEC))
     dispatch = json.loads((EXAMPLES / "dispatch" / "auto-tickets.valid.json").read_text())
     del dispatch["run_id"]
-    dispatch.update(repo=REPO, ticket=str(SPEC))
+    dispatch.update(repo=REPO, ticket=str(SPEC), base_sha=base_sha)
     return loop.enqueue(conn, repo=REPO, task="auto-tickets", ticket=str(SPEC),
                         dispatch=dispatch, workflow_id=workflow_id)
 
@@ -117,9 +124,9 @@ def workflow_status(conn):
 
 
 def test_decomposed_creates_one_issue_per_ticket_in_order_with_the_spec_label_and_parent(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("Store saved searches"),
                                             ticket("Show saved searches", [0])))
 
@@ -139,9 +146,9 @@ def test_decomposed_creates_one_issue_per_ticket_in_order_with_the_spec_label_an
 
 
 def test_decomposed_posts_a_notice_on_the_spec_listing_the_tickets_and_keeps_the_workflow_going(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A"), ticket("B", [0])))
 
     handle(conn, github, runner, settings)
@@ -156,10 +163,10 @@ def test_decomposed_posts_a_notice_on_the_spec_listing_the_tickets_and_keeps_the
 
 
 def test_blocked_by_indices_become_issue_numbers_written_as_text(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
     repo.add_issue(150, "Someone else's issue")  # numbers don't follow the list
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A"), ticket("B", [0]), ticket("C", [0, 1])))
 
     handle(conn, github, runner, settings)
@@ -171,8 +178,8 @@ def test_blocked_by_indices_become_issue_numbers_written_as_text(
     assert not [r for r in github._transport.requests if "dependencies" in r.url]
 
 
-def test_related_issues_stay_plain_references(conn, github, repo, spec, runner, settings):
-    run_id = queue_auto_tickets(conn)
+def test_related_issues_stay_plain_references(conn, remote, github, repo, spec, runner, settings):
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A", related=["123", "125"])))
 
     handle(conn, github, runner, settings)
@@ -183,8 +190,8 @@ def test_related_issues_stay_plain_references(conn, github, repo, spec, runner, 
     assert "Closes" not in a.body and "Fixes" not in a.body
 
 
-def test_acceptance_criteria_are_never_ticked(conn, github, repo, spec, runner, settings):
-    run_id = queue_auto_tickets(conn)
+def test_acceptance_criteria_are_never_ticked(conn, remote, github, repo, spec, runner, settings):
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A"), ticket("B", [0])))
 
     handle(conn, github, runner, settings)
@@ -196,9 +203,9 @@ def test_acceptance_criteria_are_never_ticked(conn, github, repo, spec, runner, 
 
 
 def test_after_a_crash_halfway_it_finishes_from_the_stored_result_and_skips_made_tickets(
-    conn, github, fake, repo, spec, runner, settings
+    conn, remote, github, fake, repo, spec, runner, settings
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A"), ticket("B", [0]), ticket("C", [1])))
     posts = 0
 
@@ -229,12 +236,12 @@ def test_after_a_crash_halfway_it_finishes_from_the_stored_result_and_skips_made
 
 
 def test_another_runs_tickets_are_not_mistaken_for_this_runs(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
     repo.add_issue(141, "From an earlier breakdown",
                    "<!-- factory:auto-tickets run=99 index=0 -->\n## Parent\n\n#140\n",
                    labels=[f"spec:{SPEC}"], state="closed")
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, decomposed(ticket("A")))
 
     handle(conn, github, runner, settings)
@@ -246,9 +253,9 @@ def test_another_runs_tickets_are_not_mistaken_for_this_runs(
 
 
 def test_needs_a_human_creates_no_issues_posts_the_comment_and_labels_the_spec(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     finish(conn, runner, run_id, {"verdict": "needs-a-human",
                                   "comment": "This needs about 20 tickets: split it in two."})
 
@@ -267,9 +274,9 @@ def test_needs_a_human_creates_no_issues_posts_the_comment_and_labels_the_spec(
 
 @pytest.mark.parametrize("blocked_by", [[1], [0]], ids=["a later ticket", "itself"])
 def test_a_ticket_blocked_by_anything_but_an_earlier_ticket_makes_the_result_invalid(
-    conn, github, repo, spec, runner, settings, blocked_by
+    conn, remote, github, repo, spec, runner, settings, blocked_by
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     output = decomposed(ticket("A", blocked_by), ticket("B"))
 
     assert finish(conn, runner, run_id, output)["outcome"] == "invalid"
@@ -279,9 +286,9 @@ def test_a_ticket_blocked_by_anything_but_an_earlier_ticket_makes_the_result_inv
 
 
 def test_a_cancelled_auto_tickets_run_cancels_the_workflow(
-    conn, github, repo, spec, runner, settings
+    conn, remote, github, repo, spec, runner, settings
 ):
-    run_id = queue_auto_tickets(conn)
+    run_id = queue_auto_tickets(conn, remote.base)
     loop.cancel(conn, runner, loop.get_run(conn, run_id))
 
     handle(conn, github, runner, settings)

@@ -5,8 +5,8 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Every trigger label is checked (`factory.triggers`); explore, implement and
-review are queued so far. What a finished run leads to is its workflow's business (`factory.workflows`).
+Every trigger label is checked (`factory.triggers`) and an accepted one
+queued. What a finished run leads to is its workflow's business (`factory.workflows`).
 """
 
 import json
@@ -28,7 +28,7 @@ from factory.github import GitHub, GitHubError
 from factory.logs import about_run
 from factory.runner import Runner
 from factory.tickets import render_notice
-from factory.workflows import implement_ticket, review_pr
+from factory.workflows import implement_spec, implement_ticket, review_pr
 
 log = logging.getLogger(__name__)
 
@@ -84,13 +84,13 @@ def handle_triggers(
     `issues` is what a poll found: a full scan's open issues and PRs, or the
     issues and PRs (open or closed) updated since the cursor.
 
-    Explore, implement and review are queued so far (implement not while the
-    ticket has an open factory PR; a review of a PR the factory didn't open is
-    findings-only, and a fork PR gets only a notice); an accepted
-    `agent:implement-spec` is left on its issue for the tickets that build
-    that workflow. The row is inserted first, then the label removed, so a crash
-    between the two leaves a duplicate trigger rather than a lost one, which
-    the next poll removes quietly. A ticket too big to dispatch gets a notice
+    Explore, implement, review and implement-spec are queued (implement not
+    while the ticket has an open factory PR; a review of a PR the factory
+    didn't open is findings-only, and a fork PR gets only a notice;
+    implement-spec not while the spec has open tickets). The row is inserted
+    first, then the label removed, so a crash between the two leaves a
+    duplicate trigger rather than a lost one, which the next poll removes
+    quietly. A ticket too big to dispatch gets a notice
     instead, and its label is removed too.
 
     Only an enrolled repo is polled. The first poll of a repo creates the
@@ -120,6 +120,9 @@ def handle_triggers(
             github.remove_label(repo, issue["number"], decision.label)
         elif decision.task == "review":
             _start_review(conn, github, settings, issue, enrolment, decision)
+            github.remove_label(repo, issue["number"], decision.label)
+        elif decision.task == "implement-spec":
+            implement_spec.start(conn, github, settings, issue, enrolment, decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
 
 

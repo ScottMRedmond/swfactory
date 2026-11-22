@@ -41,6 +41,9 @@ class Ticket:
     body: str
     comments: list[Comment] = field(default_factory=list)  # oldest first
     history: list[str] = field(default_factory=list)  # e.g. a reopened duplicate
+    # The orchestrator's own (heading, markdown) sections after the body, e.g.
+    # a spec ticket's "Spec exploration notes". Never trimmed.
+    sections: list[tuple[str, str]] = field(default_factory=list)
 
 
 def fetch(github: GitHub, repo: str, issue: dict[str, Any]) -> Ticket:
@@ -194,8 +197,8 @@ def _largest(top: int, ok: Callable[[int], bool]) -> int:
 
 
 def render(ticket: Ticket, trimmed: Sequence[str] = ()) -> str:
-    """`ticket.md`: a note of anything trimmed, the title, the body, history, then
-    the comments, oldest first."""
+    """`ticket.md`: a note of anything trimmed, the title, the body, history,
+    the orchestrator's sections, then the comments, oldest first."""
     parts = [f"> Trimmed to fit the dispatch: {', '.join(trimmed)}.\n"] if trimmed else []
     parts.append(f"# {ticket.title}\n")
     if ticket.body.strip():
@@ -203,6 +206,9 @@ def render(ticket: Ticket, trimmed: Sequence[str] = ()) -> str:
     if ticket.history:
         parts.append("## History\n")
         parts.append("".join(f"- {line}\n" for line in ticket.history))
+    for heading, text in ticket.sections:
+        parts.append(f"## {heading}\n")
+        parts.append(f"{text.strip()}\n")
     if ticket.comments:
         parts.append("## Comments\n")
         for c in ticket.comments:
