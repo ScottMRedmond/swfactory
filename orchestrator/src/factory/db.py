@@ -38,7 +38,36 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN handled_at TEXT;
     """,
-    # 3: when `factory cancel` asked for the run to be cancelled. The orchestrator
+    # 3: what the operator CLI shows besides runs (#35). See factory.state.
+    """
+    ALTER TABLE runs ADD COLUMN log_url TEXT;
+    CREATE TABLE settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE TABLE usage_readings (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        read_at TEXT NOT NULL,
+        limits  TEXT,
+        error   TEXT
+    );
+    CREATE TABLE polls (
+        repo            TEXT PRIMARY KEY,
+        last_success_at TEXT NOT NULL
+    );
+    CREATE TABLE problems (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,
+        repo       TEXT,
+        summary    TEXT NOT NULL,
+        issue      TEXT,
+        opened_at  TEXT NOT NULL,
+        closed_at  TEXT
+    );
+    CREATE UNIQUE INDEX problems_open ON problems (kind, coalesce(repo, '')) WHERE closed_at IS NULL;
+    """,
+    # 4: when `factory cancel` asked for the run to be cancelled. The orchestrator
     # acts on it in its next loop, if the run is still queued or dispatched.
     """
     ALTER TABLE runs ADD COLUMN cancel_requested_at TEXT;
@@ -67,6 +96,19 @@ def connect_readonly(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def connect_readwrite(path: str | Path) -> sqlite3.Connection:
+    """Open an existing database to write to (the CLI's requests). Never creates
+    or migrates it; check `schema_current` before writing."""
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=rw", uri=True, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def schema_current(conn: sqlite3.Connection) -> bool:
+    return _version(conn) == len(MIGRATIONS)
 
 
 def _version(conn: sqlite3.Connection) -> int:

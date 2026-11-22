@@ -196,6 +196,35 @@ def test_runs_on_open_issues_are_left_alone(conn, github, repo, runner):
     assert runner.cancelled == []
 
 
+class Clock:
+    def __init__(self):
+        self.t = 1_800_000_000.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_an_incremental_poll_sees_an_issue_closed_since_the_last_poll(conn, runner):
+    clock = Clock()
+    fake = FakeGitHub(clock=clock)
+    fake.add_repo(REPO)
+    repo = fake.repos[REPO]
+    github = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=clock), fake)
+    poller = orchestrator.Poller(clock=clock)
+    closing = repo.add_issue(7, "Closed later")
+    repo.add_issue(8, "Stays open")
+    closed_run, open_run = enqueue(conn, ticket="7"), enqueue(conn, ticket="8")
+    orchestrator.run_once(conn, github, runner, settings(), poller=poller)  # full scan
+    clock.t += 60
+    closing.state, closing.updated_at = "closed", clock()
+
+    orchestrator.run_once(conn, github, runner, settings(), poller=poller)
+
+    assert row(conn, closed_run)["outcome"] == "cancelled"
+    assert runner.cancelled == [row(conn, closed_run)["runner_run_id"]]
+    assert row(conn, open_run)["status"] == "dispatched"
+
+
 # --- factory cancel -----------------------------------------------------------
 
 

@@ -9,6 +9,7 @@ RUNS_COLUMNS = [
     "triggered_by", "status", "outcome", "runner_run_id", "dispatch", "result",
     "created_at", "dispatched_at", "finished_at",
     "handled_at",  # not in the design doc: when the orchestrator acted on the result
+    "log_url",  # not in the design doc: the runner's log link, for the CLI
     "cancel_requested_at",  # not in the design doc: when `factory cancel` asked
 ]
 

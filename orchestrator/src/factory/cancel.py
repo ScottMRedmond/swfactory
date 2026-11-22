@@ -8,9 +8,8 @@ import argparse
 import sqlite3
 import sys
 from contextlib import closing
-from datetime import UTC, datetime
 
-from factory import db
+from factory import db, loop
 
 
 def add_parser(commands: argparse._SubParsersAction) -> None:
@@ -21,15 +20,17 @@ def add_parser(commands: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    if not args.db.exists():
-        print(f"factory: no database at {args.db}", file=sys.stderr)
-        return 1
     try:
-        conn = db.connect(args.db)
+        conn = db.connect_readwrite(args.db)
+        current = db.schema_current(conn)
     except sqlite3.Error as e:
         print(f"factory: can't open {args.db}: {e}", file=sys.stderr)
         return 1
     with closing(conn):
+        if not current:
+            print(f"factory: {args.db} isn't at this factory's schema version; "
+                  "start the orchestrator to migrate it", file=sys.stderr)
+            return 1
         row = conn.execute("SELECT status FROM runs WHERE id = ?", (args.run,)).fetchone()
         if row is None:
             print(f"factory: no run {args.run}", file=sys.stderr)
@@ -37,11 +38,6 @@ def run(args: argparse.Namespace) -> int:
         if row["status"] == "done":
             print(f"factory: run {args.run} is already done", file=sys.stderr)
             return 1
-        with conn:
-            conn.execute(
-                """UPDATE runs SET cancel_requested_at = coalesce(cancel_requested_at, ?)
-                   WHERE id = ?""",
-                (datetime.now(UTC).isoformat(timespec="seconds"), args.run),
-            )
+        loop.request_cancel(conn, args.run)
     print(f"asked to cancel run {args.run}; the orchestrator cancels it in its next loop")
     return 0
