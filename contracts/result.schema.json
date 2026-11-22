@@ -15,6 +15,7 @@
     "check": {"$ref": "#/$defs/check", "description": "Implement and smoke: the check after the task."},
     "check_before": {"$ref": "#/$defs/check", "description": "Review: the check before the agent ran."},
     "check_after": {"$ref": "#/$defs/check", "description": "Review: the check on review's fixes."},
+    "instructions_changed": {"const": true, "description": "Review: the PR changes CLAUDE.md, AGENTS.md or .claude/, so it was reviewed against the base's instead. Absent when it doesn't."},
     "output": {"description": "The task's output; its sub-schema depends on task."}
   },
   "allOf": [
@@ -30,14 +31,14 @@
       "if": {"properties": {"task": {"const": "explore"}}},
       "then": {
         "properties": {"output": {"$ref": "#/$defs/explore_output"}},
-        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}]}
+        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}, {"required": ["instructions_changed"]}]}
       }
     },
     {
       "if": {"properties": {"task": {"const": "implement"}}},
       "then": {
         "properties": {"output": {"$ref": "#/$defs/implement_output"}},
-        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}]}
+        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}, {"required": ["instructions_changed"]}]}
       }
     },
     {
@@ -51,14 +52,14 @@
       "if": {"properties": {"task": {"const": "auto-tickets"}}},
       "then": {
         "properties": {"output": {"$ref": "#/$defs/auto_tickets_output"}},
-        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}]}
+        "not": {"anyOf": [{"required": ["check"]}, {"required": ["check_before"]}, {"required": ["check_after"]}, {"required": ["instructions_changed"]}]}
       }
     },
     {
       "if": {"properties": {"task": {"const": "smoke"}}},
       "then": {
         "properties": {"output": {"$ref": "#/$defs/smoke_output"}},
-        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}]}
+        "not": {"anyOf": [{"required": ["check_before"]}, {"required": ["check_after"]}, {"required": ["instructions_changed"]}]}
       }
     }
   ],

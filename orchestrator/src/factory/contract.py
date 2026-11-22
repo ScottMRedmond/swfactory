@@ -272,6 +272,8 @@ class ReviewResult(_ResultBase):
     task: Literal["review"]
     check_before: Check | None = None
     check_after: Check | None = None
+    # The PR changes CLAUDE.md, AGENTS.md or .claude/; review ran with the base's.
+    instructions_changed: Literal[True] | None = None
     output: ReviewOutput | None = None
 
 

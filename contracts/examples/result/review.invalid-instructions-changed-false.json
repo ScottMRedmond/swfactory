@@ -1,0 +1,40 @@
+{
+  "contract_version": 1,
+  "run_id": 420,
+  "task": "review",
+  "outcome": "succeeded",
+  "check_before": {
+    "passed": false,
+    "output_tail": "app/search.py:12: error: Missing return type\nFound 1 error in 1 file\n"
+  },
+  "check_after": {
+    "passed": true,
+    "output_tail": "Success: no issues found\n42 passed in 2.10s\n"
+  },
+  "output": {
+    "standards": {
+      "verdict": "pass",
+      "reasoning": "After the fixes, the change follows the repo's typing and naming rules."
+    },
+    "spec": {
+      "verdict": "changes-requested",
+      "reasoning": "Search folds accents, but the ticket also asked for the filter box to do so."
+    },
+    "comments": [
+      {
+        "axis": "spec",
+        "title": "The filter box still matches accents exactly",
+        "path": "app/filters.py",
+        "line": 31,
+        "body": "filter_names() compares raw strings; the ticket asks for both search and filter."
+      }
+    ],
+    "fixed": [
+      "review: standards: add the missing return type to normalise()"
+    ],
+    "missing_rules": [
+      "Public functions should have return types"
+    ]
+  },
+  "instructions_changed": false
+}
