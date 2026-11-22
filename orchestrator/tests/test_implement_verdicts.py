@@ -253,7 +253,7 @@ def test_needs_a_human_pushes_nothing_posts_the_comment_and_labels_the_ticket(
     assert run["outcome"] == "succeeded"
     assert remote.remote_branch(f"factory/7-{row['id']}") is None
     assert pulls(repo) == []
-    comment = issue.comments[-1]["body"]
+    comment = issue.posts[-1]["body"]
     assert "The ticket contradicts the README on sort order." in comment
     assert f"Factory run {row['id']}" in comment
     assert issue.labels == ["needs-a-human"]
@@ -269,7 +269,7 @@ def test_a_bundle_touching_a_protected_path_is_invalid_and_nothing_is_written(
 ):
     issue = ticket(repo)
     row = implement_dispatched(conn, github, runner, settings)
-    comments = len(issue.comments)
+    comments = len(issue.posts)
     bundle = commits(remote, row, {".github/workflows/ci.yml": "on: push\n"})
 
     run = finish_implement(conn, github, runner, settings, row, bundle)
@@ -277,7 +277,7 @@ def test_a_bundle_touching_a_protected_path_is_invalid_and_nothing_is_written(
     assert run["outcome"] == "invalid"
     assert remote.remote_branch(f"factory/7-{row['id']}") is None
     assert pulls(repo) == []
-    assert len(issue.comments) == comments
+    assert len(issue.posts) == comments
 
 
 def test_built_without_a_bundle_is_invalid(conn, github, repo, runner, settings):
@@ -296,7 +296,7 @@ def test_a_token_in_the_agents_prose_is_invalid_and_nothing_is_posted(
 ):
     issue = ticket(repo)
     row = implement_dispatched(conn, github, runner, settings)
-    comments = len(issue.comments)
+    comments = len(issue.posts)
     prose = {"pr_body": "Done. sk-ant-oat01-abcdef"} if verdict == "built" else {
         "comment": "Here: sk-ant-oat01-abcdef"}
 
@@ -306,7 +306,7 @@ def test_a_token_in_the_agents_prose_is_invalid_and_nothing_is_posted(
     assert run["outcome"] == "invalid"
     assert pulls(repo) == []
     assert remote.remote_branch(f"factory/7-{row['id']}") is None
-    assert len(issue.comments) == comments
+    assert len(issue.posts) == comments
     assert "needs-a-human" not in issue.labels
 
 

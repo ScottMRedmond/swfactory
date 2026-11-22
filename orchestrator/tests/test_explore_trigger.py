@@ -160,7 +160,7 @@ def test_unlabelled_issues_are_left_alone(conn, github, repo, settings):
 
     assert runs(conn) == []
     assert issue.labels == ["bug"]
-    assert issue.comments == []
+    assert issue.posts == []
 
 
 def test_an_issue_with_no_body_renders_as_its_title(conn, github, repo, settings):
@@ -193,7 +193,7 @@ def test_an_explore_result_is_posted_as_findings_under_the_factorys_headings(
 
     run_id = run_to_finish(conn, github, runner, settings, explore_result)
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert comment["body"] == (
         f"<!-- factory:explore run={run_id} -->\n"
         "## Explore findings\n"
@@ -237,7 +237,7 @@ def test_questions_and_duplicate_of_get_their_own_headings_and_empty_lists_say_n
 
     run_to_finish(conn, github, runner, settings, result)
 
-    body = issue.comments[0]["body"]
+    body = issue.posts[0]["body"]
     assert "**Verdict:** `needs-a-human`" in body
     assert "### Plan\n\nNone.\n\n### Files\n\nNone.\n" in body
     assert "### Questions\n\n1. Which locale?\n2. Why?\n" in body
@@ -252,7 +252,7 @@ def test_a_duplicate_names_the_issue_it_duplicates(conn, github, repo, runner, s
         lambda run_id: explore_result(run_id, verdict="duplicate", duplicate_of="3"),
     )
 
-    assert "### Duplicate of\n\n#3\n" in issue.comments[0]["body"]
+    assert "### Duplicate of\n\n#3\n" in issue.posts[0]["body"]
 
 
 def test_findings_are_posted_once_however_many_passes_follow(conn, github, repo, runner, settings):
@@ -262,7 +262,7 @@ def test_findings_are_posted_once_however_many_passes_follow(conn, github, repo,
     orchestrator.run_once(conn, github, runner, settings)
     orchestrator.run_once(conn, github, runner, settings)
 
-    assert len(issue.comments) == 1
+    assert len(issue.posts) == 1
 
 
 @pytest.mark.parametrize(
@@ -279,7 +279,7 @@ def test_a_failed_or_invalid_run_posts_nothing(conn, github, repo, runner, setti
 
     run_to_finish(conn, github, runner, settings, result)
 
-    assert issue.comments == []
+    assert issue.posts == []
 
 
 @pytest.mark.parametrize(
@@ -298,7 +298,7 @@ def test_a_result_whose_prose_holds_a_token_is_invalid_and_nothing_is_posted(
     )
 
     assert loop.get_run(conn, run_id)["outcome"] == "invalid"
-    assert issue.comments == []
+    assert issue.posts == []
 
 
 def test_a_failed_post_is_tried_again_on_the_next_pass(conn, fake, repo, runner, settings):
@@ -315,12 +315,12 @@ def test_a_failed_post_is_tried_again_on_the_next_pass(conn, fake, repo, runner,
     finish(runner, conn, 1, explore_result(1))
     broken["on"] = True
     orchestrator.run_once(conn, github, runner, settings)
-    assert issue.comments == []
+    assert issue.posts == []
 
     broken["on"] = False
     orchestrator.run_once(conn, github, runner, settings)
 
-    assert len(issue.comments) == 1
+    assert len(issue.posts) == 1
 
 
 def test_one_repo_failing_doesnt_stop_the_others(conn, fake, github, runner, settings):

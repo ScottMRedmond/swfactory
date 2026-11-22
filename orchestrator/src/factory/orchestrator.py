@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import bundles, loop, triggers, workflows
+from factory import brakes, bundles, loop, status_comment, triggers, workflows
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -333,11 +333,14 @@ def run_once(
     Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
     """
     (poller or Poller()).poll_all(conn, github, settings)
+    held = enrolments.held(conn)
     ctx = workflows.Context(conn, github, runner, settings)
-    loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn),
+    loop.tick(conn, runner, limit=settings.max_in_flight, held=held,
               check=_bundle_check(github, settings), prepare=_try_later(
                   lambda row: workflows.prepare(ctx, row)))
     handle_finished(conn, github, runner, settings)
+    status_comment.sync(conn, github, held=held,
+                        limits=brakes.Limits(max_in_flight=settings.max_in_flight))
 
 
 def _try_later[**P, R](f: Callable[P, R]) -> Callable[P, R]:

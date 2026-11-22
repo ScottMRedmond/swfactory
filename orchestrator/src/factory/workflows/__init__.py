@@ -9,12 +9,15 @@ import sqlite3
 from typing import Any
 
 from factory.workflows import base
-from factory.workflows import implement_ticket
+from factory.workflows import implement_spec, implement_ticket
 from factory.workflows.base import Context, Workflow
 
 __all__ = ["BY_KIND", "Context", "Workflow", "on_result", "prepare"]
 
-BY_KIND: dict[str, Workflow] = {implement_ticket.KIND: implement_ticket}  # type: ignore[dict-item]
+BY_KIND: dict[str, Workflow] = {  # type: ignore[dict-item]
+    implement_ticket.KIND: implement_ticket,
+    implement_spec.KIND: implement_spec,
+}
 
 
 def on_result(ctx: Context, run: sqlite3.Row) -> None:

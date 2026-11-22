@@ -80,6 +80,11 @@ class Issue:
         self.comments.append(comment)
         return comment
 
+    @property
+    def posts(self) -> list[dict[str, Any]]:
+        """The comments other than the factory's status comment."""
+        return [c for c in self.comments if "<!-- factory:status -->" not in c["body"]]
+
     def add_event(self, event: str, login: str, created_at: str, **kw) -> dict:
         """An issue event such as `closed` or `reopened`, by `login`."""
         data = {"id": next(self._ids), "event": event,
@@ -205,10 +210,12 @@ class FakeGitHub:
             ("GET", repo + r"/branches/([^/]+)", self._branch, "token"),
             ("GET", repo + "/issues", self._list_issues, "token"),
             ("GET", repo + r"/issues/(\d+)", self._get_issue, "token"),
+            ("POST", repo + "/issues", self._create_issue, "token"),
             ("DELETE", repo + r"/issues/(\d+)/labels/(.+)", self._remove_label, "token"),
             ("POST", repo + r"/issues/(\d+)/comments", self._comment, "token"),
             ("POST", repo + r"/issues/(\d+)/labels", self._add_labels, "token"),
             ("PATCH", repo + r"/issues/(\d+)", self._update_issue, "token"),
+            ("PATCH", repo + r"/issues/comments/(\d+)", self._edit_comment, "token"),
             ("GET", repo + r"/contents/(.+)", self._contents, "token"),
             ("GET", repo + "/labels", self._list_labels, "token"),
             ("POST", repo + "/labels", self._create_label, "token"),
@@ -364,6 +371,16 @@ class FakeGitHub:
             return _json(404, {"message": "Not Found"})
         return _json(200, issue.json(f"{owner}/{name}"))
 
+    def _create_issue(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        for label in body.get("labels", []):
+            if label not in repo.labels:  # like GitHub (with push access): created
+                repo.labels[label] = {"name": label, "color": "ededed", "description": ""}
+        number = max(repo.issues, default=0) + 1
+        issue = repo.add_issue(number, body["title"], body.get("body"), body.get("labels", []),
+                               author=APP_LOGIN, updated_at=self.clock())
+        return _json(201, issue.json(repo.full_name))
+
     def _remove_label(self, owner, name, number, label, *, query, body):
         issue = self.repos[f"{owner}/{name}"].issues[int(number)]
         if label not in issue.labels:
@@ -377,6 +394,17 @@ class FakeGitHub:
         comment = issue.add_comment(APP_LOGIN, body["body"], created_at=_iso(self.clock()))
         issue.updated_at = self.clock()
         return _json(201, comment)
+
+    def _edit_comment(self, owner, name, comment_id, *, query, body):
+        """Like GitHub: only the comment's author (here, the App) may edit it."""
+        for issue in self.repos[f"{owner}/{name}"].issues.values():
+            for comment in issue.comments:
+                if comment["id"] == int(comment_id):
+                    if comment["user"]["login"] != APP_LOGIN:
+                        return _json(403, {"message": "Resource not accessible by integration"})
+                    comment["body"] = body["body"]
+                    return _json(200, comment)
+        return _json(404, {"message": "Not Found"})
 
     def _add_labels(self, owner, name, number, *, query, body):
         repo = self.repos[f"{owner}/{name}"]
