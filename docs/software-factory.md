@@ -7,7 +7,7 @@ Two terms are used throughout:
 - A **task** is one run on a runner, with one output: explore, implement, review or auto-tickets.
 - A **workflow** is a sequence of tasks the orchestrator chains together: implement-ticket or implement-spec (see [Workflows](orchestrator.md#workflows)).
 
-This doc lives in this repo until the factory repo exists, then moves there. The **factory repo** is a private [home repo](https://www.aihero.dev/the-home-repo-pattern): it holds the factory's code, the shared skills, and each enrolled repo's enrolment.
+This doc lives in this repo until the factory repo exists, then moves there. The **factory repo** is a public [home repo](https://www.aihero.dev/the-home-repo-pattern): it holds the factory's code and the shared skills. Each enrolled repo keeps its own enrolment (see [Enrolling a repo](#enrolling-a-repo)).
 
 ## Goal
 
@@ -31,7 +31,7 @@ Out of scope for v1:
 | Git host | GitHub: each enrolled repo's own GitHub repo |
 | Orchestrator | Our own Python process on the family Mac mini (see [orchestrator.md](orchestrator.md)) |
 | Runner | GitHub Actions, behind a Runner interface |
-| Observability platform | None. Status comments, notices, factory-repo issues, Actions logs and a CLI are enough (see [Observability](orchestrator.md#observability)) |
+| Observability platform | None. Status comments, notices, factory problem issues, Actions logs and a CLI are enough (see [Observability](orchestrator.md#observability)) |
 
 ## Orchestrator
 
@@ -43,16 +43,16 @@ Its full specification is in [orchestrator.md](orchestrator.md).
 
 **Product.** GitHub Actions. The orchestrator talks to runners through a Runner interface, so it doesn't change if Actions is later replaced by a VM, Fly Machines or a self-hosted Mac mini. Agents do not run on the family Mac mini in v1: an unsandboxed agent next to family data is too risky.
 
-**Runs happen in the target repo.** The factory repo holds one **reusable workflow**, `run.yml`. Each enrolled repo holds a thin caller workflow of about 10 lines (`workflow_dispatch` → `uses: <owner>/<factory>/.github/workflows/run.yml@main`, with `permissions: contents: read` and `packages: read`), and the orchestrator dispatches that caller. The factory repo is private, so its Actions access setting allows the owner's other repos to use its workflows. So each job runs in the target repo:
+**Runs happen in the target repo.** The factory repo holds one **reusable workflow**, `run.yml`. Each enrolled repo holds a thin caller workflow of about 10 lines (`workflow_dispatch` → `uses: <owner>/<factory>/.github/workflows/run.yml@main`, with `permissions: contents: read`), and the orchestrator dispatches that caller. So each job runs in the target repo:
 
-- Its logs take the **target's visibility**, and the factory repo holds only code, never runs.
+- Its logs take the **target's visibility**, so the factory repo, which holds only code and no runs, can be public whatever its targets are.
 - It checks out the target with the job's built-in `GITHUB_TOKEN`, limited to `contents: read`. **No token travels in the dispatch.**
 - Its minutes are billed to the target repo's owner: free on a public repo, and from the account's allowance on a private one (see Visibility and cost).
 
 Each run goes through these steps:
 
 1. Validate the dispatch, and stop at once if its `contract_version` is unknown (see [The runner contract](#the-runner-contract)).
-2. Check out the target repo at `base_sha`, and the repo's enrolment from the factory repo at the dispatch's `enrolment_sha` (see [Enrolling a repo](#enrolling-a-repo)). The job's `GITHUB_TOKEN` can't read the private factory repo, so that checkout uses the factory read key (see Secrets on the runner). The ticket isn't fetched: it arrives already rendered in the dispatch (see below). For review, the checkout fetches both the PR head and its base, so the diff is on disk: the agent can't fetch anything itself (see Secrets on the runner).
+2. Check out the target repo at `base_sha`, and the repo's `.factory/` enrolment from the default-branch commit `enrolment_sha` (see [Enrolling a repo](#enrolling-a-repo)). Both come from the target repo, so the job's `GITHUB_TOKEN` is enough. The ticket isn't fetched: it arrives already rendered in the dispatch (see below). For review, the checkout fetches both the PR head and its base, so the diff is on disk: the agent can't fetch anything itself (see Secrets on the runner).
 3. Build the enrolment's Dockerfile, with Docker's GitHub Actions layer cache (`cache-from: type=gha`, kept in the target repo's Actions cache), so an unchanged image is mostly cache hits. Prebuilding each enrolment's image to GHCR is a later optimisation, if `factory stats` shows build time matters.
 4. Run the setup command (for explore, implement and review; auto-tickets only reads and writes text, so it skips setup), then the task. The agent writes only its task's output, to `output.json`.
    - The agent step has its own timeout: the task's timeout minus 5 minutes. When it fires, the steps below still run (they're `if: always()`), so the run records `failure: agent_timeout` and uploads any partial bundle instead of vanishing. The job's `timeout-minutes` stays as the backstop.
@@ -65,9 +65,7 @@ Each run goes through these steps:
 
 The orchestrator then downloads the artifact, validates it, and does all the writing to GitHub (see [Dispatching and collecting](orchestrator.md#dispatching-and-collecting)).
 
-**Secrets on the runner.** A runner holds only the Claude token and the factory read key, which are secrets in each enrolled repo (a personal account has no account-wide secrets), and the read-only `GITHUB_TOKEN`. Nothing on the runner can write to GitHub.
-
-- The **factory read key** is a read-only deploy key on the factory repo. It's in the env of the factory checkout step only. It can read the factory's code and enrolments, which hold no secrets, and nothing else.
+**Secrets on the runner.** A runner holds only the Claude token, which is a secret in each enrolled repo (a personal account has no account-wide secrets), and the read-only `GITHUB_TOKEN`. Nothing on the runner can write to GitHub.
 
 - The Claude token is in the env of the **agent step only**, not setup or the check steps.
 - Checkout uses `persist-credentials: false`, and the agent step doesn't get `GITHUB_TOKEN`, so the agent holds no GitHub credential, not even a read-only one. It doesn't need one: the steps before it put the code, its history, review's base and `ticket.md` on disk, and it works with local git only. The bundle and `result.json` are uploaded by later steps through the Actions artifact channel.
@@ -75,7 +73,7 @@ The orchestrator then downloads the artifact, validates it, and does all the wri
 
 The dispatch is visible to anyone who can read the target repo's runs, so it carries no secrets. This closes the gap in today's setup, where the PAT is kept away from the agent's step but is, in the workflow's own words, "not a wall".
 
-**Base image.** The factory publishes a base image containing Node, the Claude Code CLI, Sandcastle, agent-browser and git. Every enrolled repo builds its image `FROM` it and adds its own toolchain (Python, SQLite, …). The base image is needed because the agent harness runs on Node even when the target repo doesn't. It's a private package on GHCR, like the factory repo, and each enrolled repo is given read access in the package's settings, so the job's `GITHUB_TOKEN` (`packages: read`) can pull it.
+**Base image.** The factory publishes a base image containing Node, the Claude Code CLI, Sandcastle, agent-browser and git. Every enrolled repo builds its image `FROM` it and adds its own toolchain (Python, SQLite, …). The base image is needed because the agent harness runs on Node even when the target repo doesn't. It's a public package on GHCR, like the factory repo, so any run can pull it without a token.
 
 **Visibility and cost.** Actions logs (agent transcripts, diffs, test output) take the visibility of the repo the job runs in, which is the target repo. **v1 starts with a private repo**, so its transcripts stay private.
 
@@ -84,7 +82,7 @@ The dispatch is visible to anyone who can read the target repo's runs, so it car
 - **Spending limit:** GitHub's Actions spending limit is set to **$20 a month**. Once it's reached, runs are refused rather than billed. The Actions runner must report a refused run as [runner unavailable](orchestrator.md#dispatching-and-collecting), not as a missing run, so tickets aren't retried into `agent:blocked` while the limit holds. Confirm in the first spike what a run refused for billing looks like.
 - **The first month is a cost experiment.** `factory stats` shows minutes per task, and GitHub's billing page shows the spend. If Actions costs more than the limit allows, the alternative is a runner on our own hardware (see [Open questions](#open-questions)).
 
-The factory repo is private too. Its enrolments are named after the enrolled repos, and [factory problem](orchestrator.md#observability) issues name the repo, so a public factory repo would reveal private repos' names and toolchains.
+The factory repo stays public without revealing private repos: enrolments live in each repo's `.factory/`, and [factory problems](orchestrator.md#observability) about one repo are opened on that repo, not on the factory repo.
 
 **A possible future runner: Sandcastle cloud sandboxes.** Sandcastle isn't an orchestrator: it runs one agent per `sandcastle.run()` call, and it has no queue, polling, persistence or GitHub identity. But it can run that agent in a cloud sandbox (Daytona, E2B, Fly Sprites, Modal or Vercel), which overlaps with the Runner slot. The orchestrator could call `sandcastle.run()` directly instead of dispatching `run.yml`.
 
@@ -107,7 +105,7 @@ v1 keeps Actions, because it needs no hardware, the logs come free, and the spen
 
 The orchestrator and the tasks are written in different languages and share no code. They agree on two documents, each defined as a **JSON Schema** in `contracts/` in the factory repo:
 
-- `dispatch.schema.json` covers the dispatch: `contract_version`, run id, repo, task, ticket id, the rendered ticket markdown, the list of older open issues (for explore, see [Explore](#explore)), the PR number and the findings-only flag (for review), `base_sha` (the exact commit to start from), the branch name the orchestrator chose, `enrolment_sha` (the factory-repo commit whose enrolment the orchestrator read, so the runner and the orchestrator judge the run against the same config), the task's `model` and timeout, and an optional `previous_attempt` (see Attempts under [Limits and brakes](orchestrator.md#limits-and-brakes)). It travels as **one JSON input**, so adding a field changes the schema only, not the caller workflows. It holds no secrets.
+- `dispatch.schema.json` covers the dispatch: `contract_version`, run id, repo, task, ticket id, the rendered ticket markdown, the list of older open issues (for explore, see [Explore](#explore)), the PR number and the findings-only flag (for review), `base_sha` (the exact commit to start from), the branch name the orchestrator chose, `enrolment_sha` (the target's default-branch commit whose `.factory/` the orchestrator read, so the runner and the orchestrator judge the run against the same config), the task's `model` and timeout, and an optional `previous_attempt` (see Attempts under [Limits and brakes](orchestrator.md#limits-and-brakes)). It travels as **one JSON input**, so adding a field changes the schema only, not the caller workflows. It holds no secrets.
 - `result.schema.json` covers the `result.json` a run uploads: `contract_version`, run id, outcome (`succeeded` or `failed`), a `failure` reason when it failed (`setup_failed`, `agent_error`, `agent_timeout`, `no_output`, `invalid_output`, `check_failed`, `contract_mismatch`, `claude_auth` or `usage_limit`), whether the check passed and the last 50 lines of its output (for review, before and after the agent), and a task-specific `output` object. `output` is a **tagged union on `task`**, one sub-schema per task (see [Tasks](#tasks)), so a result for the wrong task fails validation.
 
 **Outcomes and verdicts are different things.** "The agent says stop" is a verdict in `output` (e.g. `needs-a-human`). "The machinery broke" is a `failed` outcome. The agent writes only `output.json`; the run's own steps write everything else in `result.json`, including the check result, so the agent can't claim a check passed. A `failed` result's `output` is ignored, with one exception: a review whose check failed (see [Review](orchestrator.md#review)).
@@ -128,7 +126,7 @@ Agent prose is posted as-is under the App's identity. The schemas cap its length
 
 **Secrets in prose.** An issue's body comes from its author, who may be an outsider on a public repo, and a prompt injection in it could get the agent to copy the Claude token into `output.json`. Before posting any agent prose, the orchestrator scans it for the token's prefix (`sk-ant-`) and other token-like patterns. A match makes the result `invalid`, and nothing is posted.
 
-**Protected paths.** A bundle whose commits touch `.github/workflows/` is an invalid result, whatever the task: a failed attempt, and nothing is pushed. That's where the caller workflow lives, and the App has no `workflows` permission. The check command and Dockerfile live in the factory repo (see [Enrolling a repo](#enrolling-a-repo)), so nothing in a target repo, whether an agent's commit or a human's PR, can change its own brake.
+**Protected paths.** A bundle whose commits touch `.github/workflows/` or `.factory/` is an invalid result, whatever the task: a failed attempt, and nothing is pushed. `.github/workflows/` is where the caller workflow lives, and the App has no `workflows` permission. `.factory/` holds the check command and Dockerfile, and the orchestrator reads it only from the default branch (see [Enrolling a repo](#enrolling-a-repo)), so neither an agent's commit nor a PR can change its own brake.
 
 **Review's reach.** A review bundle that touches a file outside the PR's own files and the repo's `test_paths` is also invalid. Anything else review wants to change becomes a finding, so a review can't wander into a refactor.
 
@@ -252,23 +250,23 @@ What the orchestrator does with each verdict, and how it creates the tickets, is
 
 ## Enrolling a repo
 
-A repo is enrolled with three changes: its enrolment in the factory repo, a caller workflow in the repo itself, and the GitHub App plus two secrets on the repo (the Claude token and the factory read key). The repo also needs read access to the base image's package. The factory's code knows nothing about any particular repo.
+A repo is enrolled with three changes, all on the repo itself: a `.factory/` folder, a caller workflow, and the GitHub App plus a Claude token secret. The factory repo names no enrolled repo, and the factory's code knows nothing about any particular repo.
 
 ```
 factory repo:
   factory-config.yml  # owner: <github login>, see Observability in orchestrator.md
-  repos/<owner>/<repo>/
+target repo:
+  .factory/
     Dockerfile    # FROM the factory base image, plus the repo's toolchain
     config.yml
-target repo:
   .github/workflows/factory.yml   # the caller workflow
 ```
 
-An enrolment is a recipe for building and checking the repo, not a copy of it: each run checks out the target's code fresh from the target repo.
+The enrolment is `.factory/`: a recipe for building and checking the repo. Each run checks out the target's code fresh from the target repo.
 
-A repo is polled only when the App is installed on it **and** its enrolment exists on the factory repo's `main` (see [Enrolments](orchestrator.md#enrolments)).
+A repo is polled only when the App is installed on it **and** `.factory/config.yml` exists on its default branch (see [Enrolments](orchestrator.md#enrolments)).
 
-The enrolment lives in the factory repo, not the target, so a PR can't change the check it's judged by. Changing a project's *toolchain* (e.g. a new Python version) needs a factory-repo commit. Dependencies still come from the project's own lockfile through `setup`, so day-to-day changes don't.
+**A PR can't change the check it's judged by.** The orchestrator always reads `.factory/` from the repo's **default branch**, never from a PR head or a factory branch, and passes that commit in the dispatch as `enrolment_sha`. `.factory/` is also a [protected path](#the-runner-contract), so no agent's commit can change it. Changing a project's recipe, such as its *toolchain* (e.g. a new Python version) or its check, takes a human merge to the default branch. Dependencies still come from the project's own lockfile through `setup`, so day-to-day changes don't touch `.factory/`.
 
 `config.yml` holds:
 
@@ -276,10 +274,10 @@ The enrolment lives in the factory repo, not the target, so a PR can't change th
 - `check`: e.g. `npm run check`, or `pytest`
 - `test_paths` (optional): globs for test files, e.g. `tests/**` or `**/*.test.ts`. Review's fixes may touch them as well as the PR's own files. Without it, fixes stay inside the PR's files.
 - `tasks`: which tasks are enabled for this repo. Left out, every task is enabled. A trigger for a disabled task is rejected, and a workflow that needs one refuses to start (see [Enrolments](orchestrator.md#enrolments)).
-- `enabled`: `true` or `false`. A disabled repo is still polled and its triggers are queued, but nothing is dispatched for it until it's enabled again. It stops one project without touching the others, and as a factory-repo commit it has a history.
+- `enabled`: `true` or `false`. A disabled repo is still polled and its triggers are queued, but nothing is dispatched for it until it's enabled again. It stops one project without touching the others, and as a commit to the default branch it has a history.
 - optional overrides of per-task **timeouts** (still capped at 60 by `run.yml`) and **models**. Concurrency limits, the daily cap and the usage thresholds stay global: they protect the one shared Claude subscription, and a repo shouldn't be able to raise its own share.
 
-**Validation.** `config.yml` is defined by `contracts/enrolment.schema.json`. The factory repo's CI validates every `config.yml` and builds every changed enrolment's Dockerfile on each PR, so a broken enrolment is caught at merge. At runtime, an enrolment that fails the schema isn't polled and opens a [factory problem](orchestrator.md#observability).
+**Validation.** `config.yml` is defined by `contracts/enrolment.schema.json` in the factory repo. There's no central CI over every enrolment, so `factory doctor` validates it and builds the Dockerfile, and a project's own CI can do the same. At runtime, an enrolment that fails the schema isn't polled and opens a [factory problem](orchestrator.md#observability) on the repo.
 
 **Target repo settings:**
 
@@ -291,16 +289,14 @@ The enrolment lives in the factory repo, not the target, so a PR can't change th
 
 **The Claude token** is one secret, copied to every enrolled repo (a personal account has no account-wide secrets). A `setup-token` token lasts about a year. Rotating it is a short documented loop of `gh secret set` over the enrolled repos, run by hand: the App gets no `secrets` permission, because that would let the orchestrator write runners' secrets. An expired or missing token fails runs with `claude_auth` (see [The runner contract](#the-runner-contract)).
 
-**The factory read key** is copied to every enrolled repo the same way, and rotated with the same loop. It doesn't expire, so it's rotated only if it may have leaked.
-
 **`factory doctor <repo>`** checks an enrolment before a real ticket does, then dispatches a [`smoke`](#tasks) run (see [Enrolments](orchestrator.md#enrolments)).
 
-**Unenrolling** is deleting `repos/<owner>/<repo>/` from `main` or uninstalling the App; what the orchestrator does then is in [Enrolments](orchestrator.md#enrolments). `enabled: false` stays the way to pause a repo.
+**Unenrolling** is deleting `.factory/` from the default branch or uninstalling the App; what the orchestrator does then is in [Enrolments](orchestrator.md#enrolments). `enabled: false` stays the way to pause a repo.
 
 ## Code
 
 - The orchestrator is written in Python. Its language is independent of the tasks, which run on the runner in the base image. The only coupling is the runner contract.
-- It lives in a new **private factory repo**, a home repo, together with `run.yml`, the base image, `contracts/`, the enrolments, the shared skills the tasks use (`/to-tickets`, `code-review`, …), and today's `.sandcastle/` task scripts (TypeScript), which move there and are reused.
+- It lives in a new **public factory repo**, a home repo, together with `run.yml`, the base image, `contracts/`, the shared skills the tasks use (`/to-tickets`, `code-review`, …), and today's `.sandcastle/` task scripts (TypeScript), which move there and are reused.
 - The Python project is the first enrolled repo. The cohort repo, where this doc started, is not enrolled.
 - How the orchestrator is deployed is in [Deploying](orchestrator.md#deploying).
 
@@ -309,12 +305,13 @@ The enrolment lives in the factory repo, not the target, so a PR can't change th
 The Python project has no factory today, so there is nothing to cut over from. It is a fresh enrolment.
 
 1. Build the orchestrator, `run.yml`, the base image and the contracts.
-2. Set the Actions spending limit to $20 a month on the account that owns the Python project (see [Visibility and cost](#runners)). The repo stays private. Allow the owner's other repos to use the factory repo's workflows (its Actions access setting), and add the factory read key as a read-only deploy key on the factory repo.
+2. Set the Actions spending limit to $20 a month on the account that owns the Python project (see [Visibility and cost](#runners)). The repo stays private.
 3. Enrol the Python project:
-   - add `repos/<owner>/<project>/Dockerfile` to the factory repo (`FROM` the base image, plus Python and `uv`)
-   - add `repos/<owner>/<project>/config.yml` (setup `uv sync`, check e.g. `pytest`)
+   - add `.factory/Dockerfile` to the project (`FROM` the base image, plus Python and `uv`)
+   - add `.factory/config.yml` to the project (setup `uv sync`, check e.g. `pytest`)
    - add the caller workflow to the project
-   - install the GitHub App, add the Claude token and factory read key secrets, and give the project read access to the base image's package
+   - install the GitHub App and add the Claude token secret
+   - run `factory doctor` on it
 4. Take one issue through the implement-ticket workflow (explore → implement → review) on the new factory.
 5. After a month of normal use, compare `factory stats` with the Actions bill, and decide whether to stay on hosted minutes or move to a runner on our own hardware.
 

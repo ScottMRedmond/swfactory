@@ -326,20 +326,20 @@ The orchestrator only chains queues created by auto-tickets.
 
 How a repo is enrolled, and what its `config.yml` holds, is in [Enrolling a repo](software-factory.md#enrolling-a-repo). This section covers how the orchestrator finds and applies enrolments.
 
-**Which repos are polled.** A repo is polled only when the App is installed on it **and** `repos/<owner>/<repo>/` exists on the factory repo's `main`. Every 10 minutes the orchestrator lists the App's installations and pulls a local clone of the factory repo. A repo with one but not the other is logged as a warning, opens a [factory problem](#observability) issue, and isn't polled, so installing the App alone can't spend usage, and an enrolment alone can't fail every poll. The same refresh reads `owner` from `factory-config.yml` (see [Observability](#observability)).
+**Which repos are polled.** A repo is polled only when the App is installed on it **and** `.factory/config.yml` exists on its default branch. Every 10 minutes the orchestrator lists the App's installations and reads each one's `.factory/` from the head of its default branch, so installing the App alone can't spend usage. An installed repo without `.factory/` isn't polled; it's logged and listed in `factory status`, since installing the App first and enrolling later is normal. The same refresh reads `owner` from `factory-config.yml` on the factory repo's `main` (see [Observability](#observability)).
 
-**Validation.** At runtime, an enrolment that fails `contracts/enrolment.schema.json` isn't polled and opens a [factory problem](#observability).
+**Validation.** At runtime, an enrolment that fails `contracts/enrolment.schema.json` isn't polled and opens a [factory problem](#observability) on the repo.
 
 **Applying `config.yml`:**
 
 - `tasks`: a trigger for a disabled task is removed with a notice ("`agent:review` isn't enabled for this repo"), and a workflow that needs a disabled task (implement-ticket without review, say) refuses to start, with a notice naming the missing task, rather than skipping a step.
 - `enabled: false`: the repo is still polled and its triggers are queued, but nothing is dispatched for it until it's enabled again; each held-back run's line in its status comment says so.
 - Per-task timeout and model overrides replace the global defaults (see [Limits and brakes](#limits-and-brakes)). Concurrency limits, the daily cap and the usage thresholds stay global.
-- Each dispatch carries `enrolment_sha`, the factory-repo commit whose enrolment the orchestrator read, so the runner and the orchestrator judge the run against the same config.
+- Each dispatch carries `enrolment_sha`, the default-branch commit whose `.factory/` the orchestrator read, so the runner and the orchestrator judge the run against the same config.
 
 **`factory doctor <repo>`** checks an enrolment before a real ticket does. It checks what the orchestrator can see (the App is installed, the enrolment is valid, the caller workflow is on the default branch, the labels exist, and the [target repo settings](software-factory.md#enrolling-a-repo) that the API can read), then dispatches a [`smoke`](software-factory.md#tasks) run. The smoke run can't prove the Claude secret is there; the first real run does, and `claude_auth` catches it if not.
 
-**Unenrolling.** When `repos/<owner>/<repo>/` is deleted from `main` or the App is uninstalled, the orchestrator cancels the repo's `queued` rows, lets in-flight runs finish and records their results but chains and posts nothing, and sets its `active` workflows to `stopped`. Open factory PRs, branches and labels are left alone. The "one but not the other" factory problem applies only while the enrolment and the install disagree, not once both are gone. `enabled: false` stays the way to pause a repo without any of this.
+**Unenrolling.** When `.factory/` is deleted from the default branch or the App is uninstalled, the orchestrator cancels the repo's `queued` rows, lets in-flight runs finish and records their results but chains and posts nothing, and sets its `active` workflows to `stopped`. Open factory PRs, branches and labels are left alone. `enabled: false` stays the way to pause a repo without any of this.
 
 ## Limits and brakes
 
@@ -387,17 +387,18 @@ You see the factory in three places: on GitHub, in the issues it opens about its
 
 Success stays quiet, apart from the review request when a PR goes ready. Status comments and notices are both filtered out of `ticket.md`.
 
-**Factory problems.** A problem that belongs to no ticket opens **one issue on the factory repo** per kind, assigned to `owner`. It gets a comment when the problem changes and closes itself when the problem clears. The kinds:
+**Factory problems.** A problem that belongs to no ticket opens **one issue** per kind, assigned to `owner`. A problem about one repo is opened on **that repo**, so a private repo's problems stay private. A problem about the whole factory is opened on the factory repo and names no enrolled repo. It gets a comment when the problem changes and closes itself when the problem clears. The kinds:
 
-- usage can't be read for 15 minutes (the factory has failed closed)
-- a `contract_mismatch` pause, at once
-- a repo's polls failing for 30 minutes
-- the runner unavailable for 30 minutes
-- Claude auth failing on a repo (`claude_auth`), at once
-- an enrolment that fails its schema
-- an App installed without an enrolment, or the other way round, found on the 10-minute refresh
+- On the factory repo:
+  - usage can't be read for 15 minutes (the factory has failed closed)
+  - a `contract_mismatch` pause, at once
+  - the runner unavailable for 30 minutes
+- On the repo:
+  - its polls failing for 30 minutes (opened once its API answers again, and logged meanwhile)
+  - Claude auth failing on it (`claude_auth`), at once
+  - its enrolment failing its schema
 
-The daily cap and a usage pause never open one: they're the factory working as designed, and they show on status comments and in `factory status`. The issue names the problem and the repo and never includes a raw error body, which could hold a token or private data. `owner` is a GitHub login in `factory-config.yml` at the root of the factory repo's `main`, read on the same 10-minute refresh as the enrolments, so changing it is a commit.
+The daily cap and a usage pause never open one: they're the factory working as designed, and they show on status comments and in `factory status`. The issue names the problem and never includes a raw error body, which could hold a token or private data. `owner` is a GitHub login in `factory-config.yml` at the root of the factory repo's `main`, read on the same 10-minute refresh as the enrolments, so changing it is a commit.
 
 **Down or asleep.** There's no alert in v1. A dead-man's switch would fire every time the Mac mini sleeps, which it is meant to do. If nothing seems to be happening, `factory status` shows when the last poll ran, and launchd restarts the orchestrator after a crash.
 
@@ -417,12 +418,12 @@ The read commands only read. The three writing commands only write to SQLite, an
 
 **Retention.** Agent transcripts live with the runner. On Actions they're in the logs, which last 90 days by default, and artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
 
-**Deferred.** A web runs page: status comments, notices, factory problems and the CLI leave nothing that only a page could show. If reading `factory status` without SSH matters later, the orchestrator could rewrite a pinned "Factory status" issue on the factory repo from the same data.
+**Deferred.** A web runs page: status comments, notices, factory problems and the CLI leave nothing that only a page could show. If reading `factory status` without SSH matters later, the orchestrator could rewrite a pinned "Factory status" issue from the same data, on a private repo, since the status names enrolled repos.
 
 ## Deploying
 
-- The orchestrator's code lives in the private factory repo (see [Code](software-factory.md#code)).
-- **Deploying the orchestrator** is by hand, from a tag: `git pull` the release, then `launchctl kickstart`. It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The clone it pulls every 10 minutes for enrolments is data, kept separate from the code it runs.
+- The orchestrator's code lives in the public factory repo (see [Code](software-factory.md#code)).
+- **Deploying the orchestrator** is by hand, from a tag: `git pull` the release, then `launchctl kickstart`. It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The enrolments and `factory-config.yml` it reads every 10 minutes are data, kept separate from the code it runs.
 
 ## Open questions
 
