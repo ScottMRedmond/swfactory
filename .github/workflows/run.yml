@@ -33,12 +33,14 @@ jobs:
     # a hand-made dispatch can't hold a runner for hours.
     timeout-minutes: ${{ fromJSON(inputs.dispatch).timeout_minutes > 60 && 60 || fromJSON(inputs.dispatch).timeout_minutes }}
     steps:
-      # The factory's own code, which holds the run script and contracts/.
+      # The factory's own code, which holds the run script and contracts/,
+      # at the commit this run.yml came from (job.workflow_*), so a caller
+      # pinned to a branch gets that branch's script. Falls back to main.
       # The factory repo is public, so the target's token can read it.
       - uses: actions/checkout@v4
         with:
-          repository: ScottMRedmond/swfactory
-          ref: main
+          repository: ${{ job.workflow_repository || 'ScottMRedmond/swfactory' }}
+          ref: ${{ job.workflow_sha || 'main' }}
           path: .factory-runner
           persist-credentials: false
 
