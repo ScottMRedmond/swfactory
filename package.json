@@ -6,7 +6,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p .sandcastle/agent-workflows",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "build:image": "docker build -f base-image/Dockerfile -t factory-base:test .",
+    "test:image": "vitest run --config base-image/vitest.config.ts"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "^0.14.0",

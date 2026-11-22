@@ -1,0 +1,74 @@
+# Builds the factory base image, tests it, and publishes it to GHCR as
+# ghcr.io/<owner>/factory-base. See "Base image" in docs/software-factory.md.
+name: Base image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - base-image/**
+      - .agents/skills/**
+      - .github/workflows/base-image.yml
+  pull_request:
+    paths:
+      - base-image/**
+      - .agents/skills/**
+      - .github/workflows/base-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Name the image
+        id: name
+        # GHCR names must be lowercase; the owner's login may not be.
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/factory-base" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build -f base-image/Dockerfile \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.description=The software factory's base image: Node, Claude Code, Sandcastle, agent-browser, git and the factory skills plugin" \
+            -t "${{ steps.name.outputs.image }}:${{ github.sha }}" .
+
+      - name: Test
+        env:
+          FACTORY_BASE_IMAGE: ${{ steps.name.outputs.image }}:${{ github.sha }}
+        run: npm run test:image
+
+      - name: Publish
+        # Only main publishes; pull requests just build and test. The image
+        # pushed is the one that was tested.
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
