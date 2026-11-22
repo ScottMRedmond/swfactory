@@ -62,6 +62,15 @@ jobs:
           # stores it in the clone.
           GITHUB_TOKEN: ${{ github.token }}
           FACTORY_BUILD_CACHE: gha
+          # The script hands it to the agent's `docker exec` by name and to
+          # nothing else: setup and the check never see it.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The App's bot identity, which authors every commit an agent makes.
+          # The email is <bot user id>+<name>@users.noreply.github.com; the
+          # id is `gh api '/users/<app-slug>%5Bbot%5D' --jq .id`. Until these
+          # are filled in, implement and review runs fail with setup_failed.
+          FACTORY_BOT_NAME: ""
+          FACTORY_BOT_EMAIL: ""
         run: |
           printf '%s' "$DISPATCH" > "$RUNNER_TEMP/dispatch.json"
           cd .factory-runner

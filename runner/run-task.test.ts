@@ -255,3 +255,318 @@ describe("the dispatch", () => {
     expect(run.status).toBe(2);
   });
 });
+
+// The agent tasks run Claude Code in the container. These tests swap it for
+// a fake `claude` (a bash script in the enrolment, copied over the real one),
+// so no Claude usage is spent. The fake finds its files where the prompt
+// says: the task's folder is /home/agent/factory, the repo is the workspace.
+const FACTORY = "/home/agent/factory";
+
+const fakeClaude = (script: string, config = "setup: \"true\"\ncheck: echo checked\n"): Files => ({
+  ".factory/Dockerfile": `FROM ${baseImage}\nCOPY --chmod=755 fake-claude /usr/local/bin/claude\n`,
+  ".factory/config.yml": config,
+  ".factory/fake-claude": `#!/bin/bash\nset -u\n${script}\n`,
+});
+
+// One stream-json line as Claude Code prints it.
+const event = (data: object) => `echo '${JSON.stringify({ session_id: "s-1", ...data })}'`;
+const success = event({ type: "result", subtype: "success", is_error: false, result: "done" });
+
+const implementOutput = { verdict: "built", pr_body: "Built it." };
+const writeOutput = (output: unknown) =>
+  `cat > ${FACTORY}/output.json <<'JSON'\n${typeof output === "string" ? output : JSON.stringify(output)}\nJSON`;
+
+const implementDispatch = (sha: string, extra: object = {}) => ({
+  contract_version: 1,
+  run_id: 414,
+  repo: "octo/widgets",
+  task: "implement",
+  ticket: "123",
+  ticket_markdown: "# Search ignores accents\n",
+  base_sha: sha,
+  branch: "factory/123-414",
+  enrolment_sha: sha,
+  model: "claude-test-model",
+  timeout_minutes: 45,
+  triggered_by: { login: "octocat", id: 583231 },
+  ...extra,
+});
+
+// What run.yml gives the script: the Claude token and the App's bot identity.
+const bot = {
+  FACTORY_BOT_NAME: "swfactory[bot]",
+  FACTORY_BOT_EMAIL: "1234+swfactory[bot]@users.noreply.github.com",
+};
+const claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token", ...bot };
+
+describe("the agent step", () => {
+  it("runs the agent and puts its output.json in a succeeded result", () => {
+    const target = makeTarget();
+    const sha = target.commit(fakeClaude(`${writeOutput(implementOutput)}\n${success}`));
+
+    const run = runTask(implementDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toEqual({
+      contract_version: 1,
+      run_id: 414,
+      task: "implement",
+      outcome: "succeeded",
+      check: { passed: true, output_tail: "checked\n" },
+      output: implementOutput,
+    });
+    expect(run.status).toBe(0);
+  });
+
+  it("gives the agent the Claude token and no GitHub credential, and setup and the check no Claude token", () => {
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(
+        `env | sed 's/^/agent-env: /'; git config --list --show-origin | sed 's/^/agent-git: /'\n` +
+          `${writeOutput(implementOutput)}\n${success}`,
+        "setup: |\n  env | sed 's/^/setup-env: /'\ncheck: |\n  env | sed 's/^/check-env: /'\n",
+      ),
+    );
+
+    const run = runTask(implementDispatch(sha), target.url, {
+      ...claudeEnv,
+      GITHUB_TOKEN: "ghs_secret_token",
+    });
+
+    expect(run.result?.outcome, run.output).toBe("succeeded");
+    expect(run.output).toContain("agent-env: CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-test-token");
+    expect(run.output).toMatch(/^agent-git: /m);
+    expect(run.output).not.toContain("ghs_secret_token");
+    expect(run.output).not.toMatch(/extraheader|credential/i);
+    expect(run.output).toMatch(/^setup-env: /m);
+    expect(run.output).not.toMatch(/^(setup|check)-env: CLAUDE/m);
+  });
+
+  it("gives the agent the ticket and its output's schema, and runs no check or bundle for explore", () => {
+    const exploreOutput = {
+      verdict: "easy-call",
+      summary: "Fold accents.",
+      findings: "search() compares raw strings.",
+      plan: ["Fold accents"],
+      files: ["app/search.py"],
+    };
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(
+        `sed 's/^/prompt: /'\nsed 's/^/ticket: /' ${FACTORY}/ticket.md\n` +
+          `echo x > x.txt && git add x.txt && git -c user.name=a -c user.email=a@a commit -q -m x\n` +
+          `${writeOutput(exploreOutput)}\n${success}`,
+      ),
+    );
+
+    const run = runTask(
+      {
+        contract_version: 1,
+        run_id: 412,
+        repo: "octo/widgets",
+        task: "explore",
+        ticket: "123",
+        ticket_markdown: "# Search ignores accents\n",
+        older_issues: [],
+        base_sha: sha,
+        enrolment_sha: sha,
+        model: "claude-test-model",
+        timeout_minutes: 20,
+      },
+      target.url,
+      claudeEnv,
+    );
+
+    expect(run.result, run.output).toEqual({
+      contract_version: 1,
+      run_id: 412,
+      task: "explore",
+      outcome: "succeeded",
+      output: exploreOutput,
+    });
+    expect(run.output).toContain("ticket: # Search ignores accents");
+    expect(run.output).toContain(`prompt: When you're done, write your output to ${FACTORY}/output.json`);
+    expect(run.output).toMatch(/^prompt: .*"duplicate_of"/m);
+    expect(existsSync(join(run.out, "branch.bundle"))).toBe(false);
+  });
+
+  it("records claude_auth without starting the agent when there's no Claude token", () => {
+    const target = makeTarget();
+    const sha = target.commit(fakeClaude(`echo agent-started\n${writeOutput(implementOutput)}\n${success}`));
+
+    const run = runTask(implementDispatch(sha), target.url, { ...claudeEnv, CLAUDE_CODE_OAUTH_TOKEN: "" });
+
+    expect(run.result, run.output).toMatchObject({ outcome: "failed", failure: "claude_auth" });
+    expect(run.output).not.toContain("agent-started");
+  });
+
+  // What Claude Code 2.1.330 prints (trimmed) when the API refuses it.
+  const apiError = (error: string, status: number, text: string) =>
+    [
+      event({ type: "assistant", error, api_error_status: status, is_api_error_message: true,
+              message: { role: "assistant", content: [{ type: "text", text }] } }),
+      event({ type: "result", subtype: "success", is_error: true, api_error_status: status, result: text }),
+      "exit 1",
+    ].join("\n");
+
+  it.each([
+    ["claude_auth", apiError("authentication_failed", 401, "Failed to authenticate. API Error: 401 Invalid bearer token")],
+    ["claude_auth", [
+      event({ type: "assistant", error: "authentication_failed", message: { content: [] } }),
+      event({ type: "result", subtype: "success", is_error: true, api_error_status: null, result: "Not logged in" }),
+      "exit 1",
+    ].join("\n")],
+    ["usage_limit", apiError("rate_limit", 429, "Claude AI usage limit reached")],
+    ["agent_error", `${writeOutput(implementOutput)}\nexit 3`],
+    ["agent_error", `${writeOutput(implementOutput)}\n${event({ type: "result", subtype: "error_during_execution", is_error: true })}`],
+    ["agent_error", writeOutput(implementOutput)],
+    ["no_output", success],
+  ])("records %s", (failure, script) => {
+    const target = makeTarget();
+    const sha = target.commit(fakeClaude(script));
+
+    const run = runTask(implementDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toEqual({
+      contract_version: 1,
+      run_id: 414,
+      task: "implement",
+      outcome: "failed",
+      failure,
+      check: { passed: true, output_tail: "checked\n" },
+    });
+  });
+
+  // The fake answers its first session one way and a resumed one another.
+  const firstThenResumed = (first: string, resumed: string) => `
+if [[ " $* " == *" --resume s-1 "* ]]; then
+  sed 's/^/resumed-with: /'
+  ${resumed}
+else
+  cat > /dev/null
+  ${first}
+fi
+${success}`;
+
+  it("gives an invalid output.json back to the agent once, in the same session", () => {
+    const target = makeTarget();
+    const sha = target.commit(
+      fakeClaude(firstThenResumed(writeOutput({ verdcit: "built" }), writeOutput(implementOutput))),
+    );
+
+    const run = runTask(implementDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toMatchObject({ outcome: "succeeded", output: implementOutput });
+    expect(run.output).toMatch(/^resumed-with: .*verdict/m);
+  });
+
+  it.each([
+    ["fails the schema twice", writeOutput({ verdcit: "built" })],
+    ["isn't JSON, then is deleted", `rm ${FACTORY}/output.json`],
+  ])("records invalid_output when output.json %s", (_, resumed) => {
+    const target = makeTarget();
+    const sha = target.commit(fakeClaude(firstThenResumed(writeOutput("{not json"), resumed)));
+
+    const run = runTask(implementDispatch(sha), target.url, claudeEnv);
+
+    expect(run.result, run.output).toMatchObject({ outcome: "failed", failure: "invalid_output" });
+    expect(run.output).toContain("resumed-with: ");
+    expect(run.output).not.toContain("agent session 3");
+  });
+});
+
+describe("the agent's commits", () => {
+  // The fake commits like an agent would, with whatever identity it likes.
+  const commit = (file: string) =>
+    `echo ${file} > ${file} && git add ${file} && git commit -q -m "Add ${file}" -m "Because." ` +
+    `--author "Agent Smith <smith@example.com>"`;
+
+  // A clone of the target at base_sha with the run's bundle fetched into it.
+  const unbundle = (target: { url: string }, run: Run) => {
+    const dir = mkdtempSync(join(tmpdir(), "factory-unbundle-"));
+    git(dir, "clone", "-q", target.url, "clone");
+    const clone = join(dir, "clone");
+    const bundle = join(run.out, "branch.bundle");
+    return {
+      verify: git(clone, "bundle", "verify", bundle),
+      heads: git(clone, "bundle", "list-heads", bundle),
+      log: (format: string) => {
+        git(clone, "fetch", "-q", bundle, "refs/heads/factory/123-414:refs/heads/fetched");
+        return git(clone, "log", `--format=${format}`, "main..fetched");
+      },
+    };
+  };
+
+  it("bundles the commits on the named branch, authored by the App's bot with the triggering human as co-author", () => {
+    const target = makeTarget();
+    const base = target.commit(
+      fakeClaude(`${commit("one.txt")}\n${commit("two.txt")}\necho stray > stray.txt\n${writeOutput(implementOutput)}\n${success}`),
+    );
+
+    const run = runTask(
+      implementDispatch(base, { triggered_by: { login: "octocat", id: 583231 } }),
+      target.url,
+      claudeEnv,
+    );
+
+    expect(run.result?.outcome, run.output).toBe("succeeded");
+    const bundle = unbundle(target, run);
+    expect(bundle.heads).toMatch(/^[0-9a-f]{40} refs\/heads\/factory\/123-414$/);
+    expect(bundle.verify).toContain(base);
+    expect(bundle.log("%an <%ae>|%cn <%ce>|%s").split("\n")).toEqual([
+      "swfactory[bot] <1234+swfactory[bot]@users.noreply.github.com>|swfactory[bot] <1234+swfactory[bot]@users.noreply.github.com>|Add two.txt",
+      "swfactory[bot] <1234+swfactory[bot]@users.noreply.github.com>|swfactory[bot] <1234+swfactory[bot]@users.noreply.github.com>|Add one.txt",
+    ]);
+    expect(bundle.log("%B")).toBe(
+      ["Add two.txt", "", "Because.", "", "Co-Authored-By: octocat <583231+octocat@users.noreply.github.com>", "",
+       "Add one.txt", "", "Because.", "", "Co-Authored-By: octocat <583231+octocat@users.noreply.github.com>"].join("\n"),
+    );
+  });
+
+  it("uploads no bundle when the agent made no commits", () => {
+    const target = makeTarget();
+    const base = target.commit(fakeClaude(`${writeOutput(implementOutput)}\n${success}`));
+
+    const run = runTask(implementDispatch(base), target.url, claudeEnv);
+
+    expect(run.result?.outcome, run.output).toBe("succeeded");
+    expect(existsSync(join(run.out, "branch.bundle"))).toBe(false);
+  });
+
+  it("refuses to run a task that commits without the App's bot identity", () => {
+    const target = makeTarget();
+    const base = target.commit(fakeClaude(`echo agent-started\n${success}`));
+
+    const run = runTask(implementDispatch(base), target.url, {
+      CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token",
+      FACTORY_BOT_NAME: "",
+      FACTORY_BOT_EMAIL: "",
+    });
+
+    expect(run.result, run.output).toMatchObject({ outcome: "failed", failure: "setup_failed" });
+    expect(run.output).not.toContain("agent-started");
+  });
+
+  // Slow: the shortest agent timeout is a minute (a 6-minute task).
+  it("times the agent out at the task's timeout minus 5 minutes, and still bundles and checks", () => {
+    const target = makeTarget();
+    const base = target.commit(
+      fakeClaude(`${commit("one.txt")}\n${event({ type: "system", subtype: "init" })}\nsleep 600\n${success}`),
+    );
+
+    const started = Date.now();
+    const run = runTask(implementDispatch(base, { timeout_minutes: 6 }), target.url, claudeEnv);
+    const seconds = (Date.now() - started) / 1000;
+
+    expect(run.result, run.output).toEqual({
+      contract_version: 1,
+      run_id: 414,
+      task: "implement",
+      outcome: "failed",
+      failure: "agent_timeout",
+      check: { passed: true, output_tail: "checked\n" },
+    });
+    expect(seconds).toBeGreaterThan(60);
+    expect(seconds).toBeLessThan(120);
+    expect(unbundle(target, run).log("%s")).toBe("Add one.txt");
+  });
+});

@@ -4,17 +4,22 @@
 //
 // It validates the dispatch, checks out the target at base_sha and its
 // .factory/ enrolment at enrolment_sha, builds the enrolment's image, runs
-// setup and the check in it, and writes out-dir/result.json, validated
-// against contracts/result.schema.json. Whatever happens after the dispatch
-// is accepted, it still runs the check and writes a result: the "if:
-// always()" steps live here, not in the workflow, so another runner can call
-// this same script. See "Runners" in docs/software-factory.md.
+// setup, the agent (agent.ts) and the check in it, and writes
+// out-dir/result.json, validated against contracts/result.schema.json, plus
+// out-dir/branch.bundle when the agent committed on the dispatch's branch
+// (commits.ts). Whatever happens after the dispatch is accepted, it still
+// bundles, runs the check and writes a result: the "if: always()" steps live
+// here, not in the workflow, so another runner can call this same script.
+// See "Runners" in docs/software-factory.md.
 //
 // The runner (run.yml on Actions) only prepares the job, calls this script
 // and uploads out-dir. Environment:
 //
 //   GITHUB_TOKEN        read-only token used to fetch the target, passed to
 //                       git per command and never written to .git/config
+//   CLAUDE_CODE_OAUTH_TOKEN  the Claude token, passed to the agent only
+//   FACTORY_BOT_NAME, FACTORY_BOT_EMAIL  the App's bot identity, which
+//                       authors the agent's commits (implement and review)
 //   FACTORY_TARGET_URL  where to fetch the target from (default
 //                       https://github.com/<repo>.git; tests use a local path)
 //   FACTORY_BUILD_CACHE "gha" to build with the GitHub Actions layer cache
@@ -23,11 +28,16 @@
 // why), 2 when it couldn't write a valid result.json at all.
 
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { AGENT_DIR, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
+import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
 import { loadContracts, type Contract, type Contracts } from "./contract";
+
+const RUNNER = dirname(fileURLToPath(import.meta.url));
 
 type Dispatch = {
   contract_version: number;
@@ -37,6 +47,11 @@ type Dispatch = {
   base_sha: string;
   enrolment_sha: string;
   timeout_minutes: number;
+  // Agent tasks only.
+  ticket_markdown?: string;
+  model?: string;
+  branch?: string;
+  triggered_by?: TriggeredBy;
 };
 
 type Check = { passed: boolean; output_tail: string };
@@ -174,6 +189,8 @@ const startContainer = (image: string, target: string) => {
     mustRun("setup_failed", "docker", ["exec", "-u", "root", id, "mkdir", "-p", WORKSPACE]);
     mustRun("setup_failed", "docker", ["cp", `${target}/.`, `${id}:${WORKSPACE}`]);
     mustRun("setup_failed", "docker", ["exec", "-u", "root", id, "chown", "-R", owner, WORKSPACE]);
+    // The agent's own folder, outside the repo so nothing in it is committed.
+    mustRun("setup_failed", "docker", ["exec", "-u", "root", id, "install", "-d", "-o", owner.split(":")[0]!, AGENT_DIR]);
   } catch (error) {
     stop();
     throw error;
@@ -186,11 +203,51 @@ const startContainer = (image: string, target: string) => {
     log(`${name} exited ${result.status}`);
     return result;
   };
-  return { sh, stop };
+  return { id, sh, stop };
+};
+
+const AGENT_TASKS = ["explore", "implement", "review", "auto-tickets"];
+// Tasks whose result carries a `check` (review's check_before/check_after
+// and its other steps are the review task's).
+const CHECKED_TASKS = ["implement", "smoke"];
+
+// The task's prompt (runner/tasks/<task>/prompt.md, from the task tickets)
+// followed by what every agent task is told: where the ticket is, and the
+// one file it writes.
+const taskPrompt = (contract: Contract, task: string): string => {
+  const file = join(RUNNER, "tasks", task, "prompt.md");
+  const own = existsSync(file) ? readFileSync(file, "utf8").trimEnd() + "\n\n" : "";
+  return [
+    `${own}## Your output`,
+    "",
+    `The ticket is in ${TICKET}. The repo is checked out in ${WORKSPACE}; use local git only.`,
+    "",
+    `When you're done, write your output to ${OUTPUT}: one JSON object matching this JSON Schema. Write nothing else there.`,
+    "",
+    "```json",
+    JSON.stringify(contract.outputSchema(task), null, 2),
+    "```",
+    "",
+  ].join("\n");
+};
+
+// Step 4: the agent. Its timeout is the job's (capped at 60 like run.yml)
+// minus 5 minutes, so the steps after it still have time to run.
+const agentStep = (contract: Contract, dispatch: Dispatch, container: string): AgentOutcome => {
+  if (dispatch.ticket_markdown !== undefined) putFile(container, TICKET, dispatch.ticket_markdown);
+  const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
+  return runAgent({
+    container,
+    workspace: WORKSPACE,
+    model: dispatch.model!,
+    prompt: taskPrompt(contract, dispatch.task),
+    timeoutSeconds: minutes * 60,
+    validate: (output) => contract.validateOutput(dispatch.task, output),
+  });
 };
 
 // The steps after the dispatch is accepted. It always returns a result.
-const runTask = (contract: Contract, dispatch: Dispatch, work: string): Result => {
+const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: string): Result => {
   const base = {
     contract_version: dispatch.contract_version,
     run_id: dispatch.run_id,
@@ -199,14 +256,28 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string): Result =
 
   let failure: string | undefined;
   let check: Check | undefined;
+  let output: object | undefined;
   let container: ReturnType<typeof startContainer> | undefined;
   let enrolment: Enrolment | undefined;
+  let branch: { name: string; identity: Identity; triggeredBy: TriggeredBy } | undefined;
   try {
     const { target, factoryDir } = checkout(dispatch, work);
     enrolment = readEnrolment(contract, factoryDir);
+    // Tasks that commit need the bot identity before anything runs.
+    const identity = dispatch.branch === undefined ? undefined : botIdentity();
+    if (typeof identity === "string") throw new RunFailure("setup_failed", identity);
     container = startContainer(buildImage(dispatch, factoryDir), target);
     if (container.sh("setup", enrolment.setup).status !== 0) {
-      failure = "setup_failed";
+      throw new RunFailure("setup_failed", "setup failed");
+    }
+    if (dispatch.branch !== undefined && identity && dispatch.triggered_by) {
+      openBranch(container.id, WORKSPACE, dispatch.branch, identity);
+      branch = { name: dispatch.branch, identity, triggeredBy: dispatch.triggered_by };
+    }
+    if (AGENT_TASKS.includes(dispatch.task)) {
+      const agent = agentStep(contract, dispatch, container.id);
+      if ("failure" in agent) throw new RunFailure(agent.failure, agent.reason);
+      output = agent.output;
     }
   } catch (error) {
     if (!(error instanceof RunFailure)) throw error;
@@ -214,9 +285,25 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string): Result =
     failure = error.failure;
   }
 
-  // Runs whatever happened above, as long as there's somewhere to run it.
+  // Steps 5-7 run whatever happened above, as long as there's somewhere to
+  // run them.
   try {
-    if (container && enrolment) {
+    if (container && branch) {
+      // Even after a timeout: a partial bundle is still worth uploading.
+      try {
+        bundleBranch(container.id, WORKSPACE, {
+          branch: branch.name,
+          baseSha: dispatch.base_sha,
+          identity: branch.identity,
+          triggeredBy: branch.triggeredBy,
+          outDir,
+        });
+      } catch (error) {
+        log(String(error));
+        failure ??= "agent_error";
+      }
+    }
+    if (container && enrolment && CHECKED_TASKS.includes(dispatch.task)) {
       const result = container.sh("check", enrolment.check);
       check = { passed: result.status === 0, output_tail: outputTail(result.output) };
       if (!check.passed) failure ??= "check_failed";
@@ -225,9 +312,11 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string): Result =
     container?.stop();
   }
 
+  // A failed result keeps the agent's output if it wrote a valid one (a
+  // failed check); the orchestrator decides whether to use it.
   return failure
-    ? { ...base, outcome: "failed", failure, ...(check && { check }) }
-    : { ...base, outcome: "succeeded", check, output: {} };
+    ? { ...base, outcome: "failed", failure, ...(check && { check }), ...(output && { output }) }
+    : { ...base, outcome: "succeeded", ...(check && { check }), output: output ?? {} };
 };
 
 class Rejected extends Error {}
@@ -284,7 +373,7 @@ const main = (argv: string[]): number => {
     const accepted = accept(contracts, readFileSync(dispatchPath, "utf8"));
     if ("dispatch" in accepted) {
       contract = accepted.contract;
-      result = runTask(contract, accepted.dispatch, work);
+      result = runTask(contract, accepted.dispatch, work, outDir);
     } else {
       result = accepted;
     }

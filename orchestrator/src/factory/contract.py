@@ -51,6 +51,13 @@ class OlderIssue(_Strict):
     title: Annotated[str, Field(max_length=1024)]
 
 
+class TriggeredBy(_Strict):
+    """Who triggered the workflow; commits name them in a Co-Authored-By trailer."""
+
+    login: Annotated[str, Field(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")]
+    id: Annotated[int, Field(ge=1)]
+
+
 class PreviousAttempt(_Strict):
     outcome: Literal["failed", "invalid"]
     failure: Failure | None = None
@@ -93,11 +100,13 @@ class ExploreDispatch(_AgentDispatch):
 class ImplementDispatch(_AgentDispatch):
     task: Literal["implement"]
     branch: Branch
+    triggered_by: TriggeredBy
 
 
 class ReviewDispatch(_AgentDispatch):
     task: Literal["review"]
     branch: Branch
+    triggered_by: TriggeredBy
     pr_number: Annotated[int, Field(ge=1)]
     pr_base_sha: Sha
     findings_only: bool

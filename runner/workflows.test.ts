@@ -96,6 +96,18 @@ describe("run.yml", () => {
     expect(before).toContainEqual(expect.stringMatching(/^crazy-max\/ghaction-github-runtime@/));
   });
 
+  it("gives the Claude token to the run script only, which passes it to the agent alone", () => {
+    const withToken = steps.filter((s) => JSON.stringify(s).includes("CLAUDE_CODE_OAUTH_TOKEN"));
+    expect(withToken).toEqual([scriptSteps[0]]);
+    expect(scriptSteps[0].env.CLAUDE_CODE_OAUTH_TOKEN).toBe("${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}");
+    expect(job.env ?? {}).not.toHaveProperty("CLAUDE_CODE_OAUTH_TOKEN");
+  });
+
+  it("sets the App's bot identity for the agent's commits", () => {
+    expect(scriptSteps[0].env).toHaveProperty("FACTORY_BOT_NAME");
+    expect(scriptSteps[0].env).toHaveProperty("FACTORY_BOT_EMAIL");
+  });
+
   it("only prepares the job before the script: no step runs a task's own commands", () => {
     for (const step of steps.slice(0, scriptIndex)) {
       if (step.run) expect(step.run.trim()).toMatch(/^npm ci/);
