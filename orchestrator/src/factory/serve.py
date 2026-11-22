@@ -57,7 +57,7 @@ def run(args: argparse.Namespace) -> int:
     auth = AppAuth(app_id, private_key, TRANSPORT)
     github = GitHub(auth, TRANSPORT)
     runner: Runner = CannedRunner(output) if args.fake_runner else ActionsRunner(TRANSPORT, auth)
-    settings = orchestrator.Settings()
+    settings = orchestrator.Settings(git_dir=args.db.parent / "git")
     try:
         orchestrator.serve(conn, github, runner, settings, sleep=SLEEP)
     except KeyboardInterrupt:

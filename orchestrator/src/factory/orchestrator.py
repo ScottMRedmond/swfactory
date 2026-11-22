@@ -16,10 +16,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from factory import bundles, loop, triggers, workflows
 from factory import enrolment as enrolments
-from factory import loop, triggers, workflows
 from factory import state as db_state
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
@@ -52,6 +53,8 @@ class Settings:
     per_issue_concurrency: int = 1  # active runs per issue or PR, whatever the task
     timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
+    # Where bundles are checked and pushed from: a bare repo per target repo.
+    git_dir: Path = field(default_factory=lambda: Path.home() / ".factory" / "git")
 
     def timeout(self, task: str, enrolment: Enrolment) -> int:
         return enrolment.config.timeouts.get(task, self.timeouts[task])
@@ -330,8 +333,36 @@ def run_once(
     Queued runs of a repo with `enabled: false` (or no longer enrolled) wait.
     """
     (poller or Poller()).poll_all(conn, github, settings)
-    loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn))
+    ctx = workflows.Context(conn, github, runner, settings)
+    loop.tick(conn, runner, limit=settings.max_in_flight, held=enrolments.held(conn),
+              check=_bundle_check(github, settings), prepare=_try_later(
+                  lambda row: workflows.prepare(ctx, row)))
     handle_finished(conn, github, runner, settings)
+
+
+def _try_later[**P, R](f: Callable[P, R]) -> Callable[P, R]:
+    """`f`, with GitHub or git trouble turned into `loop.TryLater`."""
+
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return f(*args, **kwargs)
+        except (GitHubError, OSError) as e:
+            raise loop.TryLater(str(e)) from e
+
+    return wrapped
+
+
+def _bundle_check(github: GitHub, settings: Settings) -> loop.Check:
+    """The bundle checks of the runner contract, for every task's result."""
+    store = bundles.Store(settings.git_dir, github.git_remote)
+
+    @_try_later
+    def check(row: sqlite3.Row, result: dict[str, Any], files: Any) -> None:
+        store.check(row["repo"], row["id"], files.bundle, task=row["task"],
+                    verdict=(result.get("output") or {}).get("verdict"),
+                    base_sha=json.loads(row["dispatch"]).get("base_sha", ""))
+
+    return check
 
 
 def handle_finished(

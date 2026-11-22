@@ -23,6 +23,7 @@ from urllib.parse import quote, urlencode, urlsplit
 import jwt
 
 API = "https://api.github.com"
+WEB = "https://github.com"  # where git reaches repos
 API_VERSION = "2026-03-10"
 USER_AGENT = "swfactory-orchestrator"
 
@@ -221,9 +222,15 @@ class AppAuth:
 class GitHub:
     """The REST calls the orchestrator makes, each with a token for the repo it touches."""
 
-    def __init__(self, auth: AppAuth, transport: Transport):
+    def __init__(
+        self,
+        auth: AppAuth,
+        transport: Transport,
+        git_url: Callable[[str], str] = lambda repo: f"{WEB}/{repo}.git",
+    ):
         self._auth = auth
         self._transport = transport
+        self._git_url = git_url
         self._app_login: str | None = None
 
     def __repr__(self) -> str:
@@ -256,9 +263,12 @@ class GitHub:
             items += response.json()
         return items
 
+    def default_branch(self, repo: str) -> str:
+        return self._call(repo, "GET", "").json()["default_branch"]
+
     def default_branch_head(self, repo: str) -> str:
         """The commit at the head of the repo's default branch."""
-        branch = self._call(repo, "GET", "").json()["default_branch"]
+        branch = self.default_branch(repo)
         return self._call(repo, "GET", f"/branches/{quote(branch, safe='')}").json()["commit"]["sha"]
 
     def _each(self, repo: str, path: str, **query: Any) -> Iterator[dict[str, Any]]:
@@ -354,6 +364,32 @@ class GitHub:
                 raise
             self._call(repo, "PATCH", f"/issues/{number}",
                        {"state": "closed", "state_reason": "not_planned"})
+
+    def open_draft_pull(self, repo: str, *, head: str, base: str, title: str, body: str) -> int:
+        """Open a draft PR from branch `head` into `base` and return its number.
+        If `head` already has an open PR (opened before a crash), that one's."""
+        try:
+            return self._call(repo, "POST", "/pulls", {"title": title, "head": head, "base": base,
+                                                      "body": body, "draft": True}).json()["number"]
+        except GitHubError as e:
+            if e.status != 422:
+                raise
+            owner = repo.split("/")[0]
+            found = self._call(repo, "GET", "/pulls", state="open", head=f"{owner}:{head}").json()
+            if not found:
+                raise
+            return found[0]["number"]
+
+    def git_remote(self, repo: str) -> tuple[str, dict[str, str]]:
+        """The repo's URL for git, and the environment that makes git push and
+        fetch as the App. The token travels in the environment, never in an
+        argument, so it can't show up in a process list or an error message."""
+        basic = base64.b64encode(f"x-access-token:{self._auth.token(repo)}".encode()).decode()
+        return self._git_url(repo), {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": f"http.{WEB}/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        }
 
     def installed_repos(self) -> list[str]:
         """Every repo the App is installed on."""
