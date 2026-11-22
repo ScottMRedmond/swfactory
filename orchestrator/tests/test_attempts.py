@@ -224,13 +224,13 @@ def test_after_two_bad_attempts_the_ticket_is_blocked_and_the_workflow_stops(
     assert "agent:in-progress" not in issue.labels
     [workflow] = conn.execute("SELECT * FROM workflows").fetchall()
     assert workflow["status"] == "stopped"
-    [notice] = issue.comments
+    [notice] = issue.posts
     assert "<!-- factory:notice -->" in notice["body"]
     assert "@alice" in notice["body"]
     assert "`agent:explore`" in notice["body"]
     # Acting on it again changes nothing.
     orchestrator.run_once(conn, github, runner, settings)
-    assert len(issue.comments) == 1
+    assert len(issue.posts) == 1
 
 
 def test_an_implement_that_fails_twice_blocks_the_ticket(conn, github, repo, runner, settings):
@@ -241,7 +241,7 @@ def test_an_implement_that_fails_twice_blocks_the_ticket(conn, github, repo, run
 
     assert [r["task"] for r in runs(conn)] == ["explore", "implement", "implement"]
     assert "agent:blocked" in issue.labels
-    assert "`agent:implement`" in issue.comments[-1]["body"]
+    assert "`agent:implement`" in issue.posts[-1]["body"]
 
 
 def test_re_adding_the_trigger_label_after_giving_up_starts_again_at_attempt_one(
@@ -326,6 +326,8 @@ def test_claude_auth_holds_dispatches_for_that_repo_only(conn, github, fake, rep
     assert [r["status"] for r in other] == ["dispatched"]
     [problem] = state.open_problems(conn)
     assert (problem["kind"], problem["repo"]) == ("claude_auth", REPO)
+    [status] = [c["body"] for c in repo.issues[7].comments if c not in repo.issues[7].posts]
+    assert "queued: Claude rejected this repo's token" in status
 
 
 def test_contract_mismatch_pauses_dispatching_and_is_logged_once(
@@ -348,6 +350,8 @@ def test_contract_mismatch_pauses_dispatching_and_is_logged_once(
     assert len(mismatches) == 1
     [problem] = state.open_problems(conn)
     assert (problem["kind"], problem["repo"]) == ("contract_mismatch", None)
+    [status] = [c["body"] for c in repo.issues[7].comments if c not in repo.issues[7].posts]
+    assert "queued: dispatching paused: the runner rejected the contract version" in status
 
 
 def test_a_restart_after_a_redeploy_lifts_the_contract_mismatch_pause_and_auth_holds(

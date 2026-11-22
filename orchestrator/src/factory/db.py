@@ -103,7 +103,21 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN triggered_by_id INTEGER;
     """,
-    # 7: why the orchestrator judged a run's result `invalid`, for the retry's
+    # 7: each issue or PR's status comment (orchestrator.md#observability), and
+    # when a done run's final line was shown on it. Runs already done count as
+    # shown, so no comment is made for old work.
+    """
+    CREATE TABLE status_comments (
+        repo       TEXT NOT NULL,
+        number     INTEGER NOT NULL,
+        comment_id INTEGER NOT NULL,
+        body       TEXT NOT NULL,
+        PRIMARY KEY (repo, number)
+    );
+    ALTER TABLE runs ADD COLUMN shown_at TEXT;
+    UPDATE runs SET shown_at = finished_at WHERE status = 'done';
+    """,
+    # 8: why the orchestrator judged a run's result `invalid`, for the retry's
     # previous_attempt.validation_error.
     """
     ALTER TABLE runs ADD COLUMN validation_error TEXT;

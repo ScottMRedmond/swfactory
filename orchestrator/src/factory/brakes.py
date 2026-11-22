@@ -2,15 +2,16 @@
 
 `factory status` uses this to explain the queue. #19 wires the same rules into
 dispatching and the status comment, and moves `Limits` into the config file.
-Per-repo holds (`enabled: false`, `claude_auth`, per-issue and per-spec
-concurrency) are later tickets' to add.
+The `contract_mismatch` pause and `claude_auth` holds come from
+`factory.attempts`. Other per-repo holds (`enabled: false`, per-issue and
+per-spec concurrency) are later tickets' to add.
 """
 
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from factory import state
+from factory import attempts, state
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,8 @@ KIND_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 PAUSED = "factory paused"
 DAILY_CAP = "daily cap reached"
 USAGE_UNKNOWN = "Claude usage unknown"
+CONTRACT_MISMATCH = "dispatching paused: the runner rejected the contract version"
+CLAUDE_AUTH = "Claude rejected this repo's token"
 NEXT = "next to dispatch"
 NO_SLOT = "waiting for a free slot"
 
@@ -99,6 +102,17 @@ def queue_holds(
     queued = conn.execute("SELECT * FROM runs WHERE status = 'queued' ORDER BY id").fetchall()
     if state.is_paused(conn):
         return [(row, PAUSED) for row in queued]
+    if attempts.dispatch_paused(conn):
+        return [(row, CONTRACT_MISMATCH) for row in queued]
+    auth_held = attempts.held_repos(conn)
+    held = [(row, CLAUDE_AUTH) for row in queued if row["repo"] in auth_held]
+    rest = _global_holds(conn, [r for r in queued if r["repo"] not in auth_held], limits, now)
+    return sorted(held + rest, key=lambda pair: pair[0]["id"])
+
+
+def _global_holds(
+    conn: sqlite3.Connection, queued: list[sqlite3.Row], limits: Limits, now: datetime
+) -> list[tuple[sqlite3.Row, str]]:
     if daily_count(conn, now) >= limits.daily_cap:
         return [(row, DAILY_CAP) for row in queued]
     usage = usage_hold(state.latest_usage(conn), limits, now)

@@ -120,7 +120,7 @@ def test_needs_a_human_and_waiting_post_the_findings_label_the_ticket_and_stop(
 
     finish_explore(conn, github, runner, settings, verdict=verdict, questions=["Which locale?"])
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert f"**Verdict:** `{verdict}`" in comment["body"]
     assert issue.labels == [verdict]
     assert [w["status"] for w in workflows(conn)] == ["stopped"]
@@ -134,7 +134,7 @@ def test_easy_call_posts_the_findings_and_queues_implement_in_the_same_workflow(
 
     explore = finish_explore(conn, github, runner, settings, verdict="easy-call")
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert "**Verdict:** `easy-call`" in comment["body"]
     [implement] = [r for r in runs(conn) if r["task"] == "implement"]
     assert implement["workflow_id"] == explore["workflow_id"]
@@ -163,7 +163,7 @@ def test_easy_call_on_an_outsiders_issue_waits_for_a_human_to_add_implement(
 
     finish_explore(conn, github, runner, settings, verdict="easy-call")
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert ("@mallory, who opened this ticket, doesn't have write access, so nothing is built "
             "until someone who does reads the plan and adds `agent:implement`.") in comment["body"]
     assert [r["task"] for r in runs(conn)] == ["explore"]
@@ -181,7 +181,7 @@ def test_easy_call_on_a_repo_without_implement_enabled_stops_after_the_findings(
     finish_explore(conn, github, runner, settings, verdict="easy-call")
 
     assert ("`implement` isn't enabled for this repo (see `tasks` in `.factory/config.yml`), "
-            "so nothing is built.") in issue.comments[0]["body"]
+            "so nothing is built.") in issue.posts[0]["body"]
     assert [r["task"] for r in runs(conn)] == ["explore"]
     assert [w["status"] for w in workflows(conn)] == ["stopped"]
     assert issue.labels == ["needs-a-human"]
@@ -196,7 +196,7 @@ def test_easy_call_whose_trigger_has_no_known_user_waits_for_a_human(
     finish_explore(conn, github, runner, settings, verdict="easy-call")
 
     assert ("Nothing is built until someone with write access adds `agent:implement`."
-            in issue.comments[0]["body"])
+            in issue.posts[0]["body"])
     assert [r["task"] for r in runs(conn)] == ["explore"]
     assert issue.labels == ["needs-a-human"]
 
@@ -207,7 +207,7 @@ def test_duplicate_closes_the_ticket_as_a_duplicate_as_the_app(conn, github, rep
 
     finish_explore(conn, github, runner, settings, verdict="duplicate", duplicate_of="3")
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert "### Duplicate of\n\n#3\n" in comment["body"]
     assert (issue.state, issue.state_reason) == ("closed", "duplicate")
     [closed] = [e for e in issue.events if e["event"] == "closed"]
@@ -246,7 +246,7 @@ def test_duplicate_of_an_issue_closed_since_leaves_the_ticket_open_for_a_human(
 
     assert issue.state == "open"
     assert ("#3 has been closed since, so this ticket was left open: only a human can tell "
-            "whether its fix covers this one too.") in issue.comments[0]["body"]
+            "whether its fix covers this one too.") in issue.posts[0]["body"]
     assert issue.labels == ["needs-a-human"]
     assert [w["status"] for w in workflows(conn)] == ["stopped"]
 
@@ -260,7 +260,7 @@ def test_a_duplicate_of_an_issue_that_wasnt_sent_is_invalid_and_nothing_is_poste
     run = finish_explore(conn, github, runner, settings, verdict="duplicate", duplicate_of="5")
 
     assert run["outcome"] == "invalid"
-    assert issue.comments == []
+    assert issue.posts == []
     assert issue.state == "open"
 
 
@@ -288,7 +288,7 @@ def test_too_big_asks_a_human_and_offers_implement_spec(conn, github, repo, runn
 
     finish_explore(conn, github, runner, settings, verdict="too-big")
 
-    [comment] = issue.comments
+    [comment] = issue.posts
     assert "Add `agent:implement-spec` to build this as a spec." in comment["body"]
     assert issue.labels == ["needs-a-human"]
     assert [w["status"] for w in workflows(conn)] == ["stopped"]
@@ -324,7 +324,7 @@ def test_a_ticket_closed_mid_run_cancels_its_workflow_and_takes_in_progress_off(
     assert [r["outcome"] for r in runs(conn)] == ["cancelled"]
     assert [w["status"] for w in workflows(conn)] == ["cancelled"]
     assert issue.labels == []
-    assert issue.comments == []
+    assert issue.posts == []
 
 
 def test_easy_call_is_handled_once_however_many_passes_follow(conn, github, repo, runner, settings):
@@ -334,5 +334,5 @@ def test_easy_call_is_handled_once_however_many_passes_follow(conn, github, repo
     orchestrator.run_once(conn, github, runner, settings)
     orchestrator.run_once(conn, github, runner, settings)
 
-    assert len(issue.comments) == 1
+    assert len(issue.posts) == 1
     assert [r["task"] for r in runs(conn)] == ["explore", "implement"]

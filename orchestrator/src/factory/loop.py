@@ -250,6 +250,7 @@ def _judge(row: sqlite3.Row, files: RunFiles | None) -> tuple[str, str | None, s
         if (secret := find_secret(data.get("output"))) is not None:
             raise ContractError(f"output holds something that looks like a {secret}")
         _check_duplicate_of(row, data.get("output") or {})
+        _check_blockers_first(row, data.get("output") or {})
     except ContractError as e:
         log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
         return "invalid", kept, str(e)
@@ -264,6 +265,18 @@ def _check_duplicate_of(row: sqlite3.Row, output: dict[str, Any]) -> None:
     sent = {i["ticket"] for i in json.loads(row["dispatch"]).get("older_issues", [])}
     if duplicate_of not in sent:
         raise ContractError(f"duplicate_of {duplicate_of} isn't one of the older issues sent")
+
+
+def _check_blockers_first(row: sqlite3.Row, output: dict[str, Any]) -> None:
+    """Auto-tickets lists blockers first: a ticket's `blocked_by` names only
+    earlier tickets, so each index has an issue number by the time it's used."""
+    if row["task"] != "auto-tickets":
+        return
+    for index, ticket in enumerate(output.get("tickets") or []):
+        if any(blocker >= index for blocker in ticket.get("blocked_by", [])):
+            raise ContractError(
+                f"ticket {index}'s blocked_by {ticket['blocked_by']} names a ticket that isn't "
+                "earlier in the list")
 
 
 def _finish(

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import enrolment as enrolments
-from factory import attempts, loop, triggers, workflows
+from factory import attempts, brakes, loop, status_comment, triggers, workflows
 from factory import state as db_state
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
@@ -331,10 +331,12 @@ def run_once(
     held for `claude_auth`, wait; a `contract_mismatch` pauses every dispatch.
     """
     (poller or Poller()).poll_all(conn, github, settings)
+    held = enrolments.held(conn)
     loop.tick(conn, runner, limit=settings.max_in_flight,
-              held=enrolments.held(conn) | attempts.held_repos(conn),
-              paused=attempts.dispatch_paused(conn))
+              held=held | attempts.held_repos(conn), paused=attempts.dispatch_paused(conn))
     handle_finished(conn, github, runner, settings)
+    status_comment.sync(conn, github, held=held,
+                        limits=brakes.Limits(max_in_flight=settings.max_in_flight))
 
 
 def handle_finished(
