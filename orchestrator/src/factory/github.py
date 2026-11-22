@@ -339,10 +339,26 @@ class GitHub:
         """Issues and PRs carrying `label`, open or closed."""
         return list(self._each(repo, "/issues", state="all", labels=label))
 
-    def create_issue(self, repo: str, title: str, body: str, labels: list[str]) -> int:
-        """Open an issue; returns its number."""
-        data = {"title": title, "body": body, "labels": labels}
+    def create_issue(
+        self, repo: str, title: str, body: str, labels: list[str],
+        assignees: tuple[str, ...] = (),
+    ) -> int:
+        """Open an issue; returns its number. If GitHub won't take the assignees
+        (a 422, e.g. one without access to the repo), it's opened without them."""
+        data: dict[str, Any] = {"title": title, "body": body, "labels": labels}
+        if assignees:
+            try:
+                return int(self._call(repo, "POST", "/issues",
+                                      {**data, "assignees": list(assignees)}).json()["number"])
+            except GitHubError as e:
+                if e.status != 422:
+                    raise
         return int(self._call(repo, "POST", "/issues", data).json()["number"])
+
+    def close_issue(self, repo: str, number: int) -> None:
+        """Close an issue as completed."""
+        self._call(repo, "PATCH", f"/issues/{number}",
+                   {"state": "closed", "state_reason": "completed"})
 
     def get_issue(self, repo: str, number: int) -> dict[str, Any]:
         return self._call(repo, "GET", f"/issues/{number}").json()

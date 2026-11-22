@@ -122,6 +122,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE runs ADD COLUMN validation_error TEXT;
     """,
+    # 9: a factory problem's GitHub issue (#20): the summary last written to it,
+    # and when it was closed. Problems closed before this have nothing to close.
+    """
+    ALTER TABLE problems ADD COLUMN posted TEXT;
+    ALTER TABLE problems ADD COLUMN issue_closed_at TEXT;
+    UPDATE problems SET issue_closed_at = closed_at WHERE closed_at IS NOT NULL;
+    """,
 ]
 
 

@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 import yaml
 
 from factory import attempts
+from factory import state as db_state
 from factory.contract import ContractError, Enrolment as Config, parse_enrolment
 from factory.github import GitHub, GitHubError
 
@@ -67,7 +68,7 @@ def _now() -> str:
 
 
 def refresh(conn: sqlite3.Connection, github: GitHub, *, factory_repo: str) -> str | None:
-    """Re-read every installed repo's enrolment, and return the factory's `owner`.
+    """Re-read every installed repo's enrolment, and return (and store) the factory's `owner`.
 
     Raises if the App's installations can't be listed (nothing is changed then).
     """
@@ -83,7 +84,10 @@ def refresh(conn: sqlite3.Connection, github: GitHub, *, factory_repo: str) -> s
     for repo, row in known.items():
         if repo not in installed and row["state"] != "uninstalled":
             _record(conn, row, repo, "uninstalled", None, None, None)
-    return _owner(github, factory_repo)
+    owner = _owner(github, factory_repo)
+    if owner is not None:  # if it can't be read, the last one known stays
+        db_state.set_owner(conn, owner)
+    return owner
 
 
 def _read(github: GitHub, repo: str) -> tuple[str, str | None, str | None, str | None]:
@@ -117,6 +121,14 @@ def _record(conn, old, repo, state, sha, config, error) -> None:
                  error = excluded.error, checked_at = excluded.checked_at""",
             (repo, state, sha, config, error, _now()),
         )
+    if state == "invalid":
+        db_state.open_problem(
+            conn, "invalid_enrolment",
+            f"`{CONFIG_PATH}` fails `contracts/enrolment.schema.json`, so this repo "
+            f"isn't polled: {error}", repo=repo)
+    elif any(p["kind"] == "invalid_enrolment" and p["repo"] == repo
+             for p in db_state.open_problems(conn)):
+        db_state.close_problem(conn, "invalid_enrolment", repo=repo)
     if state == old_state:
         return
     if state == "enrolled":

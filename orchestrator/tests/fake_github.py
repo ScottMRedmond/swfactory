@@ -72,6 +72,7 @@ class Issue:
     events: list[dict[str, Any]] = field(default_factory=list)
     author: str = "someone"
     state_reason: str | None = None
+    assignees: list[str] = field(default_factory=list)
     _ids = itertools.count(1_000_000)
 
     def add_comment(self, login: str, body: str, created_at: str = "2026-11-20T10:00:00Z") -> dict:
@@ -378,7 +379,8 @@ class FakeGitHub:
                 repo.labels[label] = {"name": label, "color": "ededed", "description": ""}
         number = max(repo.issues, default=0) + 1
         issue = repo.add_issue(number, body["title"], body.get("body"), body.get("labels", []),
-                               author=APP_LOGIN, updated_at=self.clock())
+                               author=APP_LOGIN, updated_at=self.clock(),
+                               assignees=list(body.get("assignees", [])))
         return _json(201, issue.json(repo.full_name))
 
     def _remove_label(self, owner, name, number, label, *, query, body):

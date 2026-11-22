@@ -19,7 +19,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import attempts, brakes, bundles, loop, status_comment, triggers, usage, workflows
+from factory import (attempts, brakes, bundles, loop, problems, status_comment, triggers, usage,
+                     workflows)
 from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
@@ -216,7 +217,9 @@ class Poller:
     - A 5xx or network error doubles the repo's wait, up to 15 minutes; one
       success drops it back to `poll_seconds`. A 403/429 rate limit waits as
       long as `Retry-After` or `x-ratelimit-reset` says.
-    - After 30 minutes of failures, it logs an error (once per failing spell).
+    - After 30 minutes of failures, it logs an error (once per failing spell)
+      and opens the repo's `poll_failing` factory problem, closed by the next
+      successful poll. Its issue is opened once the repo's API answers.
     """
 
     def __init__(self, clock: Callable[[], float] = time.time):
@@ -267,18 +270,22 @@ class Poller:
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:
-            self._failed(repo, state, settings, now, e, _rate_limit_until(e, now))
+            self._failed(conn, repo, state, settings, now, e, _rate_limit_until(e, now))
             return
         except OSError as e:
-            self._failed(repo, state, settings, now, e, None)
+            self._failed(conn, repo, state, settings, now, e, None)
             return
         state.wait = settings.poll_seconds
         state.next_at = now + state.wait
         state.failing_since, state.alerted = None, False
         db_state.record_poll(conn, repo)
+        if any(p["kind"] == "poll_failing" and p["repo"] == repo
+               for p in db_state.open_problems(conn)):
+            db_state.close_problem(conn, "poll_failing", repo=repo)
 
     def _failed(
         self,
+        conn: sqlite3.Connection,
         repo: str,
         state: RepoPoll,
         settings: Settings,
@@ -302,6 +309,14 @@ class Poller:
             state.alerted = True
             log.error("polling %s has failed for %.0f minutes: %s",
                       repo, (now - state.failing_since) / 60, error, extra={"repo": repo})
+            since = datetime.fromtimestamp(state.failing_since, UTC).isoformat(timespec="seconds")
+            # The problem issue says what kind of error it was, never GitHub's message.
+            what = f"HTTP {error.status}" if isinstance(error, GitHubError) else type(error).__name__
+            db_state.open_problem(
+                conn, "poll_failing",
+                f"Polling this repo has failed since {since} ({what}), so new trigger labels "
+                "aren't seen. The factory keeps retrying and closes this when a poll succeeds.",
+                repo=repo)
 
 
 def _rate_limit_until(error: GitHubError, now: float) -> float | None:
@@ -354,6 +369,8 @@ def run_once(
               gate=lambda now: _gate(conn, settings.limits, held, now))
     handle_finished(conn, github, runner, settings)
     status_comment.sync(conn, github, held=held, limits=settings.limits)
+    problems.check_usage(conn, datetime.now(UTC))
+    problems.sync(conn, github, factory_repo=settings.factory_repo)
 
 
 def _gate(
