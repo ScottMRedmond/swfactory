@@ -26,8 +26,8 @@ be built or is in flight and tickets are stuck, one notice names them and the
 workflow stops (`stall`), until `agent:implement` on a ticket sets it going
 again. A ticket closed by hand shows as such in the spec PR's list
 (`_follow_closed`); the spec PR closed without merging cancels everything
-(`cancel_closed_prs`); each edit of the spec's body posts one notice
-(`_check_spec_body`).
+(`cancel_closed_prs`); each edit of the spec's body posts one notice, while
+the workflow is active or stopped (`_check_spec_body`).
 """
 
 import hashlib
@@ -572,16 +572,20 @@ def blockers(body: str | None) -> list[int]:
 
 
 def advance(ctx: Context) -> None:
-    """Each pass, move every active spec's build queue forward (`queue`). A
-    spec whose GitHub or git calls fail is tried again on the next pass."""
+    """Each pass, move every active spec's build queue forward (`queue`), and
+    post a notice when a stopped one's body changes. A spec whose GitHub or git
+    calls fail is tried again on the next pass."""
     rows = ctx.conn.execute(
-        "SELECT * FROM workflows WHERE kind = ? AND status = 'active' AND branch IS NOT NULL "
-        "ORDER BY id", (KIND,)).fetchall()
+        "SELECT * FROM workflows WHERE kind = ? AND status IN ('active', 'stopped') "
+        "AND branch IS NOT NULL ORDER BY id", (KIND,)).fetchall()
     for workflow in rows:
         if enrolments.get(ctx.conn, workflow["repo"]) is None:
             continue  # unenrolled: its workflows are stopped
         try:
-            _advance_one(ctx, workflow)
+            if workflow["status"] == "stopped":
+                _check_spec_body(ctx, workflow)
+            else:
+                _advance_one(ctx, workflow)
         except (GitHubError, OSError) as e:
             log.error("%s#%s: moving the build queue failed: %s", workflow["repo"],
                       workflow["subject"], e,

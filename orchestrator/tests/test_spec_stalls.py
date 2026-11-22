@@ -363,3 +363,23 @@ def test_each_change_to_the_specs_body_after_decomposition_posts_one_notice(
     orchestrator.run_once(conn, github, runner, settings)
     [_, notice] = edit_notices(spec)
     assert "edit the tickets to match" in notice["body"]
+
+
+def test_a_change_to_a_stalled_specs_body_posts_one_notice(
+    conn, github, repo, remote, runner, settings
+):
+    spec, _ = built_spec(conn, github, repo, runner, settings, ticket("Store saved searches"),
+                         ticket("Show saved searches", [0]))
+    orchestrator.run_once(conn, github, runner, settings)
+    [row] = implements(conn)
+    needs_a_human(conn, github, runner, settings, row)
+    orchestrator.run_once(conn, github, runner, settings)
+    assert workflow(conn)["status"] == "stopped"
+
+    spec.body += "\nAlso share saved searches.\n"
+    for _ in range(2):
+        orchestrator.run_once(conn, github, runner, settings)
+
+    assert len(edit_notices(spec)) == 1
+    assert workflow(conn)["status"] == "stopped"
+    assert len(stall_notices(spec)) == 1
