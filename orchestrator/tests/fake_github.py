@@ -132,6 +132,9 @@ class Repo:
     permissions: dict[str, str] = field(default_factory=dict)
     # Active ruleset rules by fnmatch branch pattern, e.g. {"factory/*": [{"type": "creation"}]}.
     rules: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # PRs by number: {"number", "title", "head", "base", "body", "draft", "state"}. Each is
+    # also in `issues` (with pull_request=True), sharing the issue numbers like on GitHub.
+    pulls: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     clock: Any = field(default=lambda: 1_800_000_000.0, repr=False)
 
@@ -220,6 +223,8 @@ class FakeGitHub:
             ("GET", repo + r"/issues/(\d+)/events", self._list_events, "token"),
             ("GET", repo + r"/collaborators/([^/]+)/permission", self._permission, "token"),
             ("GET", repo + r"/rules/branches/(.+)", self._branch_rules, "token"),
+            ("POST", repo + "/pulls", self._open_pull, "token"),
+            ("GET", repo + "/pulls", self._list_pulls, "token"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -450,6 +455,28 @@ class FakeGitHub:
         repo.labels[body["name"]] = {"name": body["name"], "color": body.get("color", "ededed"),
                                      "description": body.get("description", "")}
         return _json(201, repo.labels[body["name"]])
+
+
+    def _open_pull(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        if any(p["head"] == body["head"] and p["state"] == "open" for p in repo.pulls.values()):
+            return _json(422, {"message": "Validation Failed",
+                               "errors": [{"message": "A pull request already exists"}]})
+        number = max([0, *repo.issues]) + 1
+        repo.add_issue(number, body["title"], body.get("body"), pull_request=True,
+                       author=APP_LOGIN)
+        pr = {"number": number, "title": body["title"], "head": body["head"],
+              "base": body["base"], "body": body.get("body"), "draft": body.get("draft", False),
+              "state": "open"}
+        repo.pulls[number] = pr
+        return _json(201, pr)
+
+    def _list_pulls(self, owner, name, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        found = [{"number": p["number"], "head": {"ref": p["head"]}} for p in repo.pulls.values()
+                 if p["state"] == query.get("state", "open")
+                 and ("head" not in query or query["head"] == f"{owner}:{p['head']}")]
+        return _json(200, found)
 
 
 def _page(path: str, query: dict[str, str], items: list[Any]) -> Response:

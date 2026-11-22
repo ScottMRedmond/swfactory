@@ -43,6 +43,12 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
             _needs_a_human(ctx, run, workflow, output["comment"])
 
 
+def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, Any] | None:
+    """Dispatches go out as queued for now. (A spec ticket's implement will
+    start from the integration branch's head at dispatch time.)"""
+    return None
+
+
 def _decomposed(ctx: Context, run: sqlite3.Row, tickets: list[dict[str, Any]]) -> None:
     """One issue per ticket, in order, then a notice on the spec.
 
