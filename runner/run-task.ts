@@ -36,6 +36,7 @@ import { parse as parseYaml } from "yaml";
 import { AGENT_DIR, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
 import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
 import { loadContracts, type Contract, type Contracts } from "./contract";
+import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
 
 const RUNNER = dirname(fileURLToPath(import.meta.url));
 
@@ -49,6 +50,7 @@ type Dispatch = {
   timeout_minutes: number;
   // Agent tasks only.
   ticket_markdown?: string;
+  previous_attempt?: PreviousAttempt;
   model?: string;
   branch?: string;
   triggered_by?: TriggeredBy;
@@ -213,10 +215,13 @@ const CHECKED_TASKS = ["implement", "smoke"];
 
 // The task's prompt (runner/tasks/<task>/prompt.md, from the task tickets)
 // followed by what every agent task is told: where the ticket is, and the
-// one file it writes.
-const taskPrompt = (contract: Contract, task: string): string => {
+// one file it writes. In the task's prompt, {{check}} is the enrolment's
+// check command.
+const taskPrompt = (contract: Contract, task: string, enrolment: Enrolment): string => {
   const file = join(RUNNER, "tasks", task, "prompt.md");
-  const own = existsSync(file) ? readFileSync(file, "utf8").trimEnd() + "\n\n" : "";
+  const own = existsSync(file)
+    ? readFileSync(file, "utf8").trimEnd().replaceAll("{{check}}", () => enrolment.check) + "\n\n"
+    : "";
   return [
     `${own}## Your output`,
     "",
@@ -233,14 +238,16 @@ const taskPrompt = (contract: Contract, task: string): string => {
 
 // Step 4: the agent. Its timeout is the job's (capped at 60 like run.yml)
 // minus 5 minutes, so the steps after it still have time to run.
-const agentStep = (contract: Contract, dispatch: Dispatch, container: string): AgentOutcome => {
-  if (dispatch.ticket_markdown !== undefined) putFile(container, TICKET, dispatch.ticket_markdown);
+const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment, container: string): AgentOutcome => {
+  if (dispatch.ticket_markdown !== undefined) {
+    putFile(container, TICKET, withPreviousAttempt(dispatch.ticket_markdown, dispatch.previous_attempt));
+  }
   const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
   return runAgent({
     container,
     workspace: WORKSPACE,
     model: dispatch.model!,
-    prompt: taskPrompt(contract, dispatch.task),
+    prompt: taskPrompt(contract, dispatch.task, enrolment),
     timeoutSeconds: minutes * 60,
     validate: (output) => contract.validateOutput(dispatch.task, output),
   });
@@ -275,7 +282,7 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
       branch = { name: dispatch.branch, identity, triggeredBy: dispatch.triggered_by };
     }
     if (AGENT_TASKS.includes(dispatch.task)) {
-      const agent = agentStep(contract, dispatch, container.id);
+      const agent = agentStep(contract, dispatch, enrolment, container.id);
       if ("failure" in agent) throw new RunFailure(agent.failure, agent.reason);
       output = agent.output;
     }
