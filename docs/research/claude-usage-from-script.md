@@ -17,7 +17,9 @@ reports plan utilization in machine-readable form in three documented places:
    (5-hour) and weekly meters. It makes no model call and reported
    `total_cost_usd: 0` when tested locally. The type is marked experimental.
    It needs an OAuth login with the `user:profile` scope. A `claude setup-token`
-   token probably lacks that scope (see uncertainties).
+   token lacks it: tested on 2026-11-22 (Claude Code 2.1.330), `/usage` with a
+   `setup-token` token printed only the session's cost summary and no
+   `usage_report`, while a full login returned the `rate_limits.limits[]` rows.
 2. **`rate_limit_event` messages in `--output-format stream-json`** (and the
    Agent SDK): emitted during any normal run, with `utilization` and `resetsAt`.
    This is documented. It comes for free with every run you already dispatch,
