@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from factory import db, orchestrator
+from factory import db, logs, orchestrator
 from factory.github import AppAuth, GitHub, urllib_transport
 from factory.actions_runner import ActionsRunner
 from factory.runner import CannedRunner, Runner
@@ -53,7 +53,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"factory serve: {e}", file=sys.stderr)
         return 2
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    handler = logs.setup(args.logs)
     args.db.parent.mkdir(parents=True, exist_ok=True)
     conn = db.connect(args.db)
     auth = AppAuth(app_id, private_key, TRANSPORT)
@@ -66,4 +66,6 @@ def run(args: argparse.Namespace) -> int:
         return 0
     finally:
         conn.close()
+        logging.getLogger("factory").removeHandler(handler)
+        handler.close()
     return 0
