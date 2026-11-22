@@ -54,6 +54,8 @@ class Settings:
     # Concurrency, the daily cap and the usage thresholds: global, never per repo.
     limits: brakes.Limits = field(default_factory=brakes.Limits)
     per_issue_concurrency: int = 1  # active runs per issue or PR, whatever the task
+    # Tickets of one implement-spec workflow with implement queued or running.
+    per_spec_concurrency: int = 1
     timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MODELS))
     # Where bundles are checked and pushed from: a bare repo per target repo.
@@ -113,6 +115,11 @@ def handle_triggers(
         elif decision.task == "explore":
             implement_ticket.start_explore(conn, github, settings, issue, enrolment,
                                            decision.triggered_by)
+            github.remove_label(repo, issue["number"], decision.label)
+        elif decision.task == "implement" and implement_spec.is_spec_ticket(issue):
+            # Built on its spec's integration branch, not as a ticket of its own.
+            implement_spec.start_ticket(conn, github, settings, issue, enrolment,
+                                        decision.triggered_by)
             github.remove_label(repo, issue["number"], decision.label)
         elif decision.task == "implement":
             implement_ticket.start_implement(conn, github, settings, issue, enrolment,
@@ -401,6 +408,7 @@ def run_once(
     ctx = workflows.Context(conn, github, runner, settings)
     if woke and poller is not None:
         usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
+    implement_spec.advance(ctx)
     loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
               check=_bundle_check(conn, github, settings),
               prepare=_try_later(lambda row: workflows.prepare(ctx, row)),

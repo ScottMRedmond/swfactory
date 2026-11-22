@@ -47,6 +47,10 @@ class Moved(GitError):
     """The branch has commits the push doesn't have: it was refused, not forced."""
 
 
+class Conflict(Exception):
+    """A run's commits don't merge cleanly onto the branch they should land on."""
+
+
 @dataclass(frozen=True)
 class Checked:
     """A bundle that passed the checks, as fetched into the store."""
@@ -125,6 +129,48 @@ class Store:
             if "[rejected]" in e.stderr:
                 raise Moved(f"{branch} has moved: {e}") from e
             raise
+
+    def land(
+        self, repo: str, run_id: int, branch: str, *, message: str, identity: tuple[str, str]
+    ) -> str:
+        """Land run `run_id`'s checked commits on `branch` with a plain merge,
+        never with force, and return the branch's new head. A branch still at
+        the run's base is fast-forwarded; one that moved (a human pushed) gets
+        a merge commit by `identity` (name, email) with `message` if the merge
+        is clean, else `Conflict`, pushing nothing. Landing again is a no-op.
+        If the branch moves while landing, the push is refused with `Moved`."""
+        git_dir = self._repo_dir(repo)
+        url, env = self._remote(repo)
+        tip = f"refs/factory/heads/{branch}"
+        _git(git_dir, "fetch", "-q", "--no-tags", url, f"+refs/heads/{branch}:{tip}", env=env)
+        head = _git(git_dir, "rev-parse", tip)
+        run = _git(git_dir, "rev-parse", _run_ref(run_id))
+        if _ok(git_dir, "merge-base", "--is-ancestor", run, head):
+            return head  # landed already
+        if _ok(git_dir, "merge-base", "--is-ancestor", head, run):
+            new = run
+        else:
+            merged = subprocess.run(
+                ["git", f"--git-dir={git_dir}", "merge-tree", "--write-tree", "--no-messages",
+                 head, run], capture_output=True, text=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+            if merged.returncode == 1:
+                raise Conflict(f"run {run_id}'s commits conflict with {branch}")
+            if merged.returncode != 0:
+                raise GitError(f"git merge-tree failed: {merged.stderr.strip()[-500:]}")
+            tree = merged.stdout.split("\n", 1)[0].strip()
+            name, email = identity
+            who = {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+                   "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+            new = _git(git_dir, "commit-tree", tree, "-p", head, "-p", run, "-m", message,
+                       env=who)
+        try:
+            _git(git_dir, "push", "-q", url, f"{new}:refs/heads/{branch}", env=env)
+        except GitError as e:
+            if "[rejected]" in e.stderr:
+                raise Moved(f"{branch} has moved: {e}") from e
+            raise
+        return new
 
     def create_branch(self, repo: str, branch: str, sha: str) -> None:
         """Create `branch` at commit `sha` on GitHub, never with force:
@@ -221,6 +267,15 @@ def _header(bundle: bytes) -> tuple[list[str], list[str]]:
 
 def _run_ref(run_id: int) -> str:
     return f"refs/factory/runs/{run_id}"
+
+
+def _ok(git_dir: Path, *args: str) -> bool:
+    """Whether a git command that answers with its exit code says yes."""
+    try:
+        _git(git_dir, *args)
+        return True
+    except GitError:
+        return False
 
 
 def _git(git_dir: Path, *args: str, env: dict[str, str] | None = None) -> str:
