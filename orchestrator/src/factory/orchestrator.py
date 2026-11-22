@@ -5,7 +5,7 @@
 `serve` runs it about every 60 seconds, and re-reads the enrolments (which
 repos are polled, see `factory.enrolment`) every 10 minutes.
 
-Today only `agent:explore` is handled.
+Every trigger label is checked (`factory.triggers`); only explore is queued so far.
 """
 
 import json
@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from factory import enrolment as enrolments
-from factory import loop, tickets
+from factory import loop, tickets, triggers
 from factory import state as db_state
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
@@ -27,9 +27,6 @@ from factory.logs import about_run
 from factory.runner import Runner
 
 log = logging.getLogger(__name__)
-
-EXPLORE_LABEL = "agent:explore"
-
 
 # Per-task timeouts in minutes, for the whole job. They live here only and travel
 # in each dispatch; a run still running 15 minutes past its timeout is cancelled.
@@ -46,6 +43,7 @@ class Settings:
     poll_seconds: int = 60
     refresh_seconds: int = 600  # how often installations and enrolments are re-read
     max_in_flight: int = 2
+    per_issue_concurrency: int = 1  # active runs per issue or PR, whatever the task
     timeouts: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
     models: dict[str, str] = field(default_factory=lambda: {"explore": "claude-sonnet-4-6"})
 
@@ -68,15 +66,18 @@ def handle_triggers(
     issues: list[dict[str, Any]],
     settings: Settings,
 ) -> None:
-    """Queue an explore run for each open issue labelled `agent:explore`.
+    """Check the trigger labels on each issue and PR a poll found, and queue
+    what they ask for (see `factory.triggers` for what's rejected and why).
 
     `issues` is what a poll found: a full scan's open issues and PRs, or the
     issues and PRs (open or closed) updated since the cursor.
 
-    The row is inserted first, then the label removed, so a crash between the
-    two leaves a duplicate trigger rather than a lost one. A ticket that
-    already has a queued or dispatched explore isn't queued again. A ticket
-    too big to dispatch gets a notice instead, and its label is removed too.
+    Only explore is queued so far; an accepted `agent:implement`, `agent:review`
+    or `agent:implement-spec` is left on its issue for the tickets that build
+    those tasks. The row is inserted first, then the label removed, so a crash
+    between the two leaves a duplicate trigger rather than a lost one, which
+    the next poll removes quietly. A ticket too big to dispatch gets a notice
+    instead, and its label is removed too.
 
     Only an enrolled repo is polled. The first poll of a repo creates the
     factory labels it lacks.
@@ -86,36 +87,89 @@ def handle_triggers(
         raise LookupError(f"{repo} isn't enrolled")
     enrolments.ensure_labels(conn, github, repo)
     for issue in issues:
-        if "pull_request" in issue or issue.get("state", "open") != "open":
+        decision = triggers.check(
+            github, repo, issue, enrolment,
+            active=_active_on(conn, repo, issue["number"]),
+            per_issue_concurrency=settings.per_issue_concurrency,
+        )
+        if decision is None:
             continue
-        if EXPLORE_LABEL not in _label_names(issue):
-            continue
-        ticket = str(issue["number"])
-        if not _active(conn, repo, "explore", ticket):
-            head = github.default_branch_head(repo)
-            try:
-                dispatch = tickets.fit(
-                    {
-                        "contract_version": CONTRACT_VERSION,
-                        "repo": repo,
-                        "task": "explore",
-                        "ticket": ticket,
-                        "older_issues": tickets.older_issues(github, repo, issue["number"]),
-                        "base_sha": head,
-                        "enrolment_sha": enrolment.sha,
-                        "model": settings.model("explore", enrolment),
-                        "timeout_minutes": settings.timeout("explore", enrolment),
-                    },
-                    tickets.fetch(github, repo, issue),
-                )
-            except tickets.TooBig as e:
-                github.post_comment(repo, issue["number"], render_too_big_notice(str(e)))
-                log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
-            else:
-                run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch)
-                log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
-                         extra=about_run(id=run_id, repo=repo, ticket=ticket))
-        github.remove_label(repo, issue["number"], EXPLORE_LABEL)
+        if isinstance(decision, triggers.Rejection):
+            _reject(github, repo, issue, decision)
+        elif decision.task == "explore":
+            _queue_explore(conn, github, repo, issue, enrolment, settings, decision.triggered_by)
+            github.remove_label(repo, issue["number"], decision.label)
+
+
+def _queue_explore(
+    conn: sqlite3.Connection,
+    github: GitHub,
+    repo: str,
+    issue: dict[str, Any],
+    enrolment: Enrolment,
+    settings: Settings,
+    triggered_by: triggers.Added | None,
+) -> None:
+    ticket = str(issue["number"])
+    login = triggered_by.login if triggered_by else None
+    head = github.default_branch_head(repo)
+    try:
+        dispatch = tickets.fit(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "repo": repo,
+                "task": "explore",
+                "ticket": ticket,
+                "older_issues": tickets.older_issues(github, repo, issue["number"]),
+                "base_sha": head,
+                "enrolment_sha": enrolment.sha,
+                "model": settings.model("explore", enrolment),
+                "timeout_minutes": settings.timeout("explore", enrolment),
+            },
+            tickets.fetch(github, repo, issue),
+        )
+    except tickets.TooBig as e:
+        github.post_comment(repo, issue["number"], render_too_big_notice(str(e), login))
+        log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
+        return
+    run_id = loop.enqueue(conn, repo=repo, task="explore", ticket=ticket, dispatch=dispatch,
+                          triggered_by=login,
+                          triggered_by_id=triggered_by.id if triggered_by else None)
+    log.info("queued explore run %s for %s#%s", run_id, repo, ticket,
+             extra=about_run(id=run_id, repo=repo, ticket=ticket))
+
+
+def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
+    """The queued and dispatched runs on an issue or PR: its ticket's, and those
+    whose dispatch names it as their PR."""
+    rows = conn.execute(
+        "SELECT * FROM runs WHERE repo = ? AND status IN ('queued', 'dispatched') ORDER BY id",
+        (repo,),
+    ).fetchall()
+    return [r for r in rows
+            if r["ticket"] == str(number) or json.loads(r["dispatch"]).get("pr_number") == number]
+
+
+def _reject(
+    github: GitHub, repo: str, issue: dict[str, Any], rejection: triggers.Rejection
+) -> None:
+    """Post the rejection's notice, if it has one, then remove its labels."""
+    number = issue["number"]
+    if rejection.message is not None:
+        github.post_comment(repo, number, render_notice(rejection.message, rejection.mention))
+        log.info("rejected %s on %s#%s: %s", ", ".join(rejection.labels), repo, number,
+                 rejection.message, extra={"repo": repo, "ticket": str(number)})
+    else:
+        log.info("removed %s from %s#%s", ", ".join(rejection.labels), repo, number,
+                 extra={"repo": repo, "ticket": str(number)})
+    for label in rejection.labels:
+        github.remove_label(repo, number, label)
+
+
+def render_notice(message: str, mention: list[str] | None = None) -> str:
+    """A notice: a new comment, marked, @mentioning who has to act."""
+    who = "".join(f"@{login} " for login in mention or [])
+    return f"{tickets.NOTICE_MARK}\n{who}{message}\n"
 
 
 def cancel_closed(
@@ -158,19 +212,14 @@ def cancel_closed(
 def render_too_big_notice(reason: str, mention: str | None = None) -> str:
     """The notice for a ticket whose title and body alone don't fit in a dispatch.
 
-    `mention` (the login that triggered the run) is @mentioned once #9 knows it.
+    `mention` is the login that triggered the run.
     """
-    who = f"@{mention} " if mention else ""
-    return (
-        f"{tickets.NOTICE_MARK}\n"
-        f"{who}This ticket's title and body are too long to dispatch ({reason}). "
+    return render_notice(
+        f"This ticket's title and body are too long to dispatch ({reason}). "
         "Please shorten it, for example by moving logs or long examples into a linked "
-        "file or gist, then add the label again.\n"
+        "file or gist, then add the label again.",
+        [mention] if mention else [],
     )
-
-
-def _label_names(issue: dict[str, Any]) -> set[str]:
-    return {l["name"] if isinstance(l, dict) else l for l in issue.get("labels", [])}
 
 
 def _about(row: sqlite3.Row) -> dict[str, Any]:
@@ -423,14 +472,3 @@ def serve(
         except Exception:
             log.exception("the loop failed; trying again next poll")
         sleep(settings.poll_seconds)
-
-
-def _active(conn: sqlite3.Connection, repo: str, task: str, ticket: str) -> bool:
-    return (
-        conn.execute(
-            """SELECT 1 FROM runs WHERE repo = ? AND task = ? AND ticket = ?
-               AND status IN ('queued', 'dispatched')""",
-            (repo, task, ticket),
-        ).fetchone()
-        is not None
-    )
