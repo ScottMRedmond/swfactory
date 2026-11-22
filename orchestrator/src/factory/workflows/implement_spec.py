@@ -15,8 +15,9 @@ The build queue: each pass, `advance` queues implement for the
 lowest-numbered buildable ticket of every active spec (`queue`), on the
 integration branch's head, at most `per_spec_concurrency` at a time; `built`
 lands the commits with a plain merge (`_land`), and `agent:implement` on a
-spec ticket rejoins it to the queue (`start_ticket`). The spec PR (#33) and
-stalls (#34) are added by their tickets.
+spec ticket rejoins it to the queue (`start_ticket`). The first landing opens
+the spec's draft PR from the integration branch, and each landing rewrites its
+list of tickets (`_sync_spec_pr`). Stalls (#34) are added by their ticket.
 """
 
 import hashlib
@@ -210,6 +211,82 @@ def _land(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[st
     ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     log.info("implement run %s built %s#%s: landed on %s at %s", run["id"], repo, number, branch,
              head, extra=_about(run))
+    workflow = base.get(ctx.conn, workflow["id"])
+    assert workflow is not None
+    _sync_spec_pr(ctx, workflow, built=number)
+
+
+# --- the spec PR ------------------------------------------------------------------------
+
+
+def _sync_spec_pr(ctx: Context, workflow: sqlite3.Row, built: int) -> None:
+    """After ticket `built` lands: open the spec's draft PR from the
+    integration branch if it has none yet (the first landing), storing it on
+    the workflow's row, else bring its list of tickets up to date. If the PR
+    was opened before a crash, opening it again finds the same one."""
+    repo, spec = workflow["repo"], int(workflow["subject"])
+    everything = _spec_tickets(ctx, workflow)
+    issue = everything.get(built)
+    if issue is not None and BUILT not in _labels(issue):
+        # The issue list may lag the label just added.
+        everything[built] = {**issue, "labels": [*_labels(issue), BUILT]}
+    links = {n: _landing_link(ctx, repo, n) for n, i in everything.items()
+             if i["state"] == "open" and BUILT in _labels(i)}
+    body = render_spec_pr_body(spec, everything, links)
+    pr = workflow["pr"]
+    if pr is None:
+        pr = ctx.github.open_draft_pull(repo, head=workflow["branch"],
+                                        base=ctx.github.default_branch(repo),
+                                        title=ctx.github.get_issue(repo, spec)["title"],
+                                        body=body)
+        with ctx.conn:
+            ctx.conn.execute("UPDATE workflows SET pr = ? WHERE id = ?", (pr, workflow["id"]))
+        log.info("%s#%s: draft spec PR #%s from %s", repo, spec, pr, workflow["branch"],
+                 extra={"repo": repo, "ticket": str(spec)})
+    # A PR found again after a crash may hold an older list, so the body is always written.
+    ctx.github.edit_pull_body(repo, pr, body)
+
+
+def _landing_link(ctx: Context, repo: str, number: int) -> str | None:
+    """The URL of the ticket's newest landing comment, if it has one."""
+    found = [c for c in ctx.github.issue_comments(repo, number)
+             if "<!-- factory:landed run=" in (c.get("body") or "")]
+    if not found:
+        return None
+    return f"https://github.com/{repo}/issues/{number}#issuecomment-{found[-1]['id']}"
+
+
+_STUCK = {"needs-a-human": "needs a human", "waiting": "waiting", "agent:blocked": "blocked"}
+
+
+def render_spec_pr_body(
+    spec: int, everything: dict[int, dict[str, Any]], links: dict[int, str | None]
+) -> str:
+    """The spec PR's body: each ticket of the spec with its status, a landed
+    one linking to its landing comment, then a footer closing the spec and
+    every ticket but those a human closed by hand (orchestrator.md#implement-spec)."""
+    lines = []
+    for number in sorted(everything):
+        issue = everything[number]
+        names = _labels(issue)
+        if issue["state"] != "open":
+            status = "closed by hand"
+        elif BUILT in names:
+            link = links.get(number)
+            status = f"landed ([landing comment]({link}))" if link else "landed"
+        elif stuck := next((label for label in base.STALE if label in names), None):
+            status = _STUCK[stuck]
+        elif base.IN_PROGRESS in names:
+            status = "building"
+        else:
+            status = "not built yet"
+        lines.append(f"- #{number} {issue['title']}: {status}")
+    closes = [spec, *(n for n in sorted(everything) if everything[n]["state"] == "open")]
+    footer = ["\n".join(f"Closes #{n}" for n in closes),
+              f"Built ticket by ticket on `{integration_branch(spec)}`. "
+              + implement_ticket.DRAFT_NOTICE]
+    return (f"The tickets of spec #{spec}:\n\n" + "\n".join(lines)
+            + "\n\n---\n" + "\n\n".join(footer) + "\n")
 
 
 def _conflicted(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:

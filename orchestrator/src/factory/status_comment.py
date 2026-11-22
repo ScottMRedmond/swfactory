@@ -52,21 +52,29 @@ def sync(
     if not rows:
         return
     holds = _holds(conn, limits, held, now)
+    specs = {row["id"]: (row["repo"], int(row["subject"])) for row in conn.execute(
+        "SELECT id, repo, subject FROM workflows WHERE kind = ?", (SPEC_KIND,))}
     synced: dict[Subject, bool] = {}
     for row in rows:
-        for subject in _subjects(row):
+        for subject in _subjects(row, specs):
             if subject not in synced:
                 synced[subject] = _sync_one(conn, github, subject, holds, now)
     shown = [row["id"] for row in rows
-             if row["status"] == "done" and all(synced[s] for s in _subjects(row))]
+             if row["status"] == "done" and all(synced[s] for s in _subjects(row, specs))]
     with conn:
         conn.executemany("UPDATE runs SET shown_at = ? WHERE id = ?",
                          [(_iso(now), run_id) for run_id in shown])
 
 
-def _subjects(row: sqlite3.Row) -> list[Subject]:
+def _subjects(row: sqlite3.Row, specs: Mapping[int, Subject]) -> list[Subject]:
+    """The issues and PRs whose comment a run's change may alter: its ticket,
+    the PR its dispatch names, and, for a run of a spec's workflow, the spec,
+    whose spec PR line changes when a ticket's landing opens the PR."""
     numbers = [row["ticket"], json.loads(row["dispatch"] or "{}").get("pr_number")]
-    return list(dict.fromkeys((row["repo"], int(n)) for n in numbers if n is not None))
+    subjects = [(row["repo"], int(n)) for n in numbers if n is not None]
+    if row["workflow_id"] in specs:
+        subjects.append(specs[row["workflow_id"]])
+    return list(dict.fromkeys(subjects))
 
 
 def _holds(

@@ -423,6 +423,10 @@ class GitHub:
                 raise
             return found[0]["number"]
 
+    def edit_pull_body(self, repo: str, number: int, body: str) -> None:
+        """Replace a PR's body."""
+        self._call(repo, "PATCH", f"/pulls/{number}", {"body": body})
+
     def pull(self, repo: str, number: int) -> dict[str, Any]:
         """A PR as the pulls API gives it (`node_id`, `draft`, `head`, `base`, ...)."""
         return self._call(repo, "GET", f"/pulls/{number}").json()

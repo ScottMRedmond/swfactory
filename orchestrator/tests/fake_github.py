@@ -233,6 +233,7 @@ class FakeGitHub:
             ("POST", repo + "/pulls", self._open_pull, "token"),
             ("GET", repo + "/pulls", self._list_pulls, "token"),
             ("GET", repo + r"/pulls/(\d+)", self._get_pull, "token"),
+            ("PATCH", repo + r"/pulls/(\d+)", self._edit_pull, "token"),
             ("POST", repo + r"/pulls/(\d+)/requested_reviewers", self._request_reviewers, "token"),
             ("GET", repo + r"/pulls/(\d+)/files", self._pull_files, "token"),
             ("GET", repo + r"/pulls/(\d+)/reviews", self._list_reviews, "token"),
@@ -515,6 +516,16 @@ class FakeGitHub:
     @staticmethod
     def _pull_node_id(repo_name: str, number: int) -> str:
         return f"PR_{repo_name.replace('/', '_')}_{number}"
+
+    def _edit_pull(self, owner, name, number, *, query, body):
+        repo = self.repos[f"{owner}/{name}"]
+        pr = repo.pulls.get(int(number))
+        if pr is None:
+            return _json(404, {"message": "Not Found"})
+        if "body" in body:
+            pr["body"] = body["body"]
+            repo.issues[int(number)].body = body["body"]
+        return _json(200, {"number": pr["number"], "body": pr["body"]})
 
     def _get_pull(self, owner, name, number, *, query, body):
         pr = self.repos[f"{owner}/{name}"].pulls.get(int(number))
