@@ -268,10 +268,17 @@ def _finish(conn: sqlite3.Connection, run_id: int, outcome: str, result: str | N
 
 
 def dispatch(
-    conn: sqlite3.Connection, runner: Runner, *, limit: int, held: Collection[str] = ()
+    conn: sqlite3.Connection,
+    runner: Runner,
+    *,
+    limit: int,
+    held: Collection[str] = (),
+    max_new: int | None = None,
 ) -> None:
+    """Dispatch queued rows, oldest first, while fewer than `limit` are in
+    flight, skipping the repos in `held`, and at most `max_new` of them."""
     held = list(held)
-    while True:
+    while max_new is None or max_new > 0:
         in_flight = conn.execute("SELECT count(*) FROM runs WHERE status = 'dispatched'").fetchone()[0]
         if in_flight >= limit:
             return
@@ -284,6 +291,8 @@ def dispatch(
             return
         try:
             dispatch_run(conn, runner, row)
+            if max_new is not None:
+                max_new -= 1
         except RunnerUnavailable as e:
             # The row stays queued; try again next tick.
             log.warning("runner unavailable, run %s stays queued: %s", row["id"], e,

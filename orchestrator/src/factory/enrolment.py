@@ -185,10 +185,17 @@ def polled(conn: sqlite3.Connection) -> list[Enrolment]:
     return [_enrolment(r) for r in rows]
 
 
-def held(conn: sqlite3.Connection) -> set[str]:
-    """Known repos whose queued runs aren't dispatched: not enrolled, or `enabled: false`."""
+DISABLED = "`enabled: false` in `.factory/config.yml`"
+NOT_ENROLLED = "repo not enrolled"
+
+
+def held(conn: sqlite3.Connection) -> dict[str, str]:
+    """Known repos whose queued runs aren't dispatched, with why: not enrolled,
+    or `enabled: false`. (A dict, so it also works as a collection of repos.)"""
     rows = conn.execute("SELECT repo FROM repos WHERE state != 'enrolled'").fetchall()
-    return {r["repo"] for r in rows} | {e.repo for e in polled(conn) if not e.config.enabled}
+    holds = {r["repo"]: NOT_ENROLLED for r in rows}
+    holds.update({e.repo: DISABLED for e in polled(conn) if not e.config.enabled})
+    return holds
 
 
 def summary(conn: sqlite3.Connection) -> list[tuple[str, str]]:
