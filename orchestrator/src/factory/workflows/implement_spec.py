@@ -28,6 +28,10 @@ again. A ticket closed by hand shows as such in the spec PR's list
 (`_follow_closed`); the spec PR closed without merging cancels everything
 (`cancel_closed_prs`); each edit of the spec's body posts one notice, while
 the workflow is active or stopped (`_check_spec_body`).
+
+Two modules hold its parts that don't touch GitHub or the database:
+`spec_stall` (blockers, `Landed`, `stall`) and `spec_render` (the spec PR's
+body, the landed comment, the tickets' bodies).
 """
 
 import hashlib
@@ -43,11 +47,15 @@ from factory import attempts, bundles, loop, review, tickets
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError, label_names
-from factory.logs import about_run
+from factory.logs import about_row, about_run
 from factory.tickets import render_notice
 from factory.workflows import base, implement_ticket
 from factory.workflows.base import Context
 from factory.workflows.implement_ticket import render_explore_sections
+from factory.workflows.spec_render import (
+    LANDED_MARK, render_landed_comment, render_spec_pr_body, render_ticket, tickets_made_by,
+)
+from factory.workflows.spec_stall import BUILT, Landed, blockers, stall
 
 if TYPE_CHECKING:
     from factory.orchestrator import Settings
@@ -62,7 +70,6 @@ NOTES_HEADING = "Spec exploration notes"
 EXPLORE_HEADING = "Spec explore findings"  # when spec explore stops the workflow
 
 SPEC_LABEL_COLOR = "c5def5"
-_MARKER = re.compile(r"<!-- factory:auto-tickets run=(\d+) index=(\d+) -->")
 
 
 def spec_label(spec: int | str) -> str:
@@ -221,9 +228,6 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
             _needs_a_human(ctx, run, workflow, output["comment"])
 
 
-LANDED_MARK = "<!-- factory:landed run={} -->"
-
-
 def _review_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """The spec PR's review ended. As for a ticket's PR (implement_ticket):
     its fixes are pushed to the integration branch, its findings and verdict
@@ -263,7 +267,7 @@ def _ticket_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> Non
         ctx.github.add_labels(repo, number, ["needs-a-human"])
         ctx.github.remove_label(repo, number, base.IN_PROGRESS)
         log.info("implement run %s needs a human on %s#%s, a ticket of spec #%s", run["id"],
-                 repo, number, workflow["subject"], extra=_about(run))
+                 repo, number, workflow["subject"], extra=about_row(run))
 
 
 def _land(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[str, Any]) -> None:
@@ -305,7 +309,7 @@ def _land(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dict[st
     ctx.github.add_labels(repo, number, [BUILT])
     ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     log.info("implement run %s built %s#%s: landed on %s at %s", run["id"], repo, number, branch,
-             head, extra=_about(run))
+             head, extra=about_row(run))
     workflow = base.get(ctx.conn, workflow["id"])
     assert workflow is not None
     _sync_spec_pr(ctx, workflow, built=number)
@@ -346,14 +350,14 @@ def _refresh_spec_pr(ctx: Context, workflow: sqlite3.Row) -> None:
 def _spec_pr_body(ctx: Context, workflow: sqlite3.Row, built: int | None = None) -> str:
     """The spec PR's body as the tickets stand, ticket `built` having just landed."""
     repo, spec = workflow["repo"], int(workflow["subject"])
-    everything = _spec_tickets(ctx, workflow)
-    issue = everything.get(built) if built is not None else None
+    all_tickets = _spec_tickets(ctx, workflow)
+    issue = all_tickets.get(built) if built is not None else None
     if built is not None and issue is not None and BUILT not in label_names(issue):
         # The issue list may lag the label just added.
-        everything[built] = {**issue, "labels": [*label_names(issue), BUILT]}
-    links = {n: _landing_link(ctx, repo, n) for n, i in everything.items()
+        all_tickets[built] = {**issue, "labels": [*label_names(issue), BUILT]}
+    links = {n: _landing_link(ctx, repo, n) for n, i in all_tickets.items()
              if i["state"] == "open" and BUILT in label_names(i)}
-    return render_spec_pr_body(spec, everything, links)
+    return render_spec_pr_body(spec, integration_branch(spec), all_tickets, links)
 
 
 def _landing_link(ctx: Context, repo: str, number: int) -> str | None:
@@ -365,39 +369,6 @@ def _landing_link(ctx: Context, repo: str, number: int) -> str | None:
     return f"https://github.com/{repo}/issues/{number}#issuecomment-{found[-1]['id']}"
 
 
-_STUCK = {"needs-a-human": "needs a human", "waiting": "waiting", "agent:blocked": "blocked"}
-
-
-def render_spec_pr_body(
-    spec: int, everything: dict[int, dict[str, Any]], links: dict[int, str | None]
-) -> str:
-    """The spec PR's body: each ticket of the spec with its status, a landed
-    one linking to its landing comment, then a footer closing the spec and
-    every ticket but those a human closed by hand (orchestrator.md#implement-spec)."""
-    lines = []
-    for number in sorted(everything):
-        issue = everything[number]
-        names = label_names(issue)
-        if issue["state"] != "open":
-            status = "closed by hand"
-        elif BUILT in names:
-            link = links.get(number)
-            status = f"landed ([landing comment]({link}))" if link else "landed"
-        elif stuck := next((label for label in base.STALE if label in names), None):
-            status = _STUCK[stuck]
-        elif base.IN_PROGRESS in names:
-            status = "building"
-        else:
-            status = "not built yet"
-        lines.append(f"- #{number} {issue['title']}: {status}")
-    closes = [spec, *(n for n in sorted(everything) if everything[n]["state"] == "open")]
-    footer = ["\n".join(f"Closes #{n}" for n in closes),
-              f"Built ticket by ticket on `{integration_branch(spec)}`. "
-              + implement_ticket.DRAFT_NOTICE]
-    return (f"The tickets of spec #{spec}:\n\n" + "\n".join(lines)
-            + "\n\n---\n" + "\n\n".join(footer) + "\n")
-
-
 def _conflicted(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     """The ticket's commits conflict with the integration branch: they're
     discarded (`superseded`) and the ticket is queued again from the new head
@@ -407,25 +378,9 @@ def _conflicted(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     run = loop.get_run(ctx.conn, run["id"])
     assert run is not None
     log.info("implement run %s: its commits conflict with %s; discarded", run["id"],
-             workflow["branch"], extra=_about(run))
+             workflow["branch"], extra=about_row(run))
     if attempts.retry(ctx.conn, run) is None:
         implement_ticket.give_up(ctx, run, workflow, again="agent:implement", stop=False)
-
-
-def render_landed_comment(
-    run_id: int, branch: str, head: str, pr_body: str | None, log_lines: list[str],
-    notes: list[str], log_link: str,
-) -> str:
-    """The comment on a landed ticket: implement's `pr_body` (or the commit
-    log without one), under the factory's own heading. The spec PR links to it."""
-    if pr_body and pr_body.strip():
-        summary = pr_body.strip()
-    else:
-        summary = "Commits:\n\n```\n" + "\n".join(log_lines) + "\n```"
-    footer = [*notes, f"Factory run {run_id} · [runner log]({log_link})"]
-    return (f"{LANDED_MARK.format(run_id)}\n## Built\n\n"
-            f"Landed on `{branch}` at {head}. This ticket stays open until the spec's pull "
-            f"request merges.\n\n{summary}\n\n---\n" + "\n\n".join(footer) + "\n")
 
 
 def _explored(
@@ -476,7 +431,7 @@ def _queue_auto_tickets(ctx: Context, after: sqlite3.Row, workflow: sqlite3.Row)
         ctx.github.post_comment(repo, spec,
                                 tickets.render_too_big_notice(str(e), after["triggered_by"]))
         base.end(ctx, workflow, base.STOPPED, spec)
-        log.info("%s#%s is too big to dispatch: %s", repo, spec, e, extra=_about(after))
+        log.info("%s#%s is too big to dispatch: %s", repo, spec, e, extra=about_row(after))
         return
     run_id = loop.enqueue(ctx.conn, repo=repo, task="auto-tickets", ticket=str(spec),
                           dispatch=dispatch, workflow_id=workflow["id"],
@@ -532,16 +487,6 @@ def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, 
 
 # --- the build queue --------------------------------------------------------------------
 
-BUILT = "agent:built"
-_BLOCKED_BY = re.compile(r"^## Blocked by[ \t]*\n(.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-_BLOCKER = re.compile(r"^\s*[-*]\s*#(\d+)\b", re.MULTILINE)
-
-
-def blockers(body: str | None) -> list[int]:
-    """The issue numbers a ticket's `## Blocked by` section lists (`- #N` lines)."""
-    match = _BLOCKED_BY.search(body or "")
-    return [int(n) for n in _BLOCKER.findall(match.group(1))] if match else []
-
 
 def advance(ctx: Context) -> None:
     """Each pass, move every active spec's build queue forward (`queue`), and
@@ -569,9 +514,9 @@ def _advance_one(ctx: Context, workflow: sqlite3.Row) -> None:
     brought up to date if a ticket was closed or reopened by hand, then the
     queue; with nothing queued, the review or a stall (`_settle`)."""
     _check_spec_body(ctx, workflow)
-    everything = _spec_tickets(ctx, workflow)
-    _follow_closed(ctx, workflow, everything)
-    if not queue(ctx, workflow, everything=everything):
+    all_tickets = _spec_tickets(ctx, workflow)
+    _follow_closed(ctx, workflow, all_tickets)
+    if not queue(ctx, workflow, all_tickets=all_tickets):
         _settle(ctx, workflow)
 
 
@@ -579,14 +524,14 @@ _CLOSED_LINE = re.compile(r"^- #(\d+) .*: closed by hand$", re.MULTILINE)
 
 
 def _follow_closed(
-    ctx: Context, workflow: sqlite3.Row, everything: dict[int, dict[str, Any]]
+    ctx: Context, workflow: sqlite3.Row, all_tickets: dict[int, dict[str, Any]]
 ) -> None:
     """If the spec PR's list doesn't show the tickets closed by hand as they
     are now (a ticket was closed or reopened since it was written), write it
     again. One call per pass: the PR's body, read as its issue."""
     if workflow["pr"] is None:
         return
-    closed = {n for n, i in everything.items() if i["state"] != "open"}
+    closed = {n for n, i in all_tickets.items() if i["state"] != "open"}
     body = ctx.github.get_issue(workflow["repo"], workflow["pr"]).get("body") or ""
     if {int(n) for n in _CLOSED_LINE.findall(body)} != closed:
         _refresh_spec_pr(ctx, workflow)
@@ -612,7 +557,7 @@ def _check_spec_body(ctx: Context, workflow: sqlite3.Row) -> None:
 
 def queue(
     ctx: Context, workflow: sqlite3.Row, prefer: "tuple[int, Added] | None" = None, *,
-    everything: dict[int, dict[str, Any]] | None = None,
+    all_tickets: dict[int, dict[str, Any]] | None = None,
 ) -> list[int]:
     """Queue implement for the lowest-numbered buildable tickets of the spec,
     while fewer than `per_spec_concurrency` of its tickets have implement
@@ -626,22 +571,22 @@ def queue(
     open and `agent:built` (one closed by hand never counts), any other issue
     once it's closed. Implement credits whoever started the spec, or, for
     ticket `prefer[0]`, `prefer[1]` (who re-added `agent:implement`).
-    `everything` is the spec's tickets, if just read."""
+    `all_tickets` is the spec's tickets, if just read."""
     repo = workflow["repo"]
-    if everything is None:
-        everything = _spec_tickets(ctx, workflow)
+    if all_tickets is None:
+        all_tickets = _spec_tickets(ctx, workflow)
     active = ctx.conn.execute(
         "SELECT * FROM runs WHERE repo = ? AND status IN ('queued', 'dispatched')",
         (repo,)).fetchall()
     busy = {r["ticket"] for r in active}
     in_flight = len({r["ticket"] for r in active
                      if r["workflow_id"] == workflow["id"] and r["task"] == "implement"})
-    landed = _landed(ctx, repo, everything)
+    landed = Landed(ctx, repo, all_tickets)
     queued: list[int] = []
-    for number in sorted(everything):
+    for number in sorted(all_tickets):
         if in_flight >= ctx.settings.per_spec_concurrency:
             break
-        issue = everything[number]
+        issue = all_tickets[number]
         names = label_names(issue)
         if (issue["state"] != "open" or BUILT in names or str(number) in busy
                 or any(label in names for label in base.STALE)):
@@ -662,12 +607,12 @@ def _settle(ctx: Context, workflow: sqlite3.Row) -> None:
         "SELECT 1 FROM runs WHERE workflow_id = ? AND status IN ('queued', 'dispatched')",
         (workflow["id"],)).fetchone():
         return
-    everything = _spec_tickets(ctx, workflow)
-    still_open = [i for i in everything.values() if i["state"] == "open"]
+    all_tickets = _spec_tickets(ctx, workflow)
+    still_open = [i for i in all_tickets.values() if i["state"] == "open"]
     if still_open and all(BUILT in label_names(i) for i in still_open):
         _queue_spec_review(ctx, workflow)
         return
-    lines = stall(everything, _landed(ctx, workflow["repo"], everything))
+    lines = stall(all_tickets, Landed(ctx, workflow["repo"], all_tickets))
     if lines is not None:
         _stalled(ctx, workflow, lines)
 
@@ -691,75 +636,6 @@ def _stalled(ctx: Context, workflow: sqlite3.Row, lines: list[str]) -> None:
     _refresh_spec_pr(ctx, workflow)
     base.end(ctx, workflow, base.STOPPED, spec)
     log.info("%s#%s: the spec stalled", repo, spec, extra={"repo": repo, "ticket": str(spec)})
-
-
-def stall(everything: dict[int, dict[str, Any]], landed: "Landed") -> list[str] | None:
-    """Why the spec's tickets can't move, one line per ticket (or cycle), or
-    None if one of them still can by itself: it waits only on an open issue
-    outside the spec. Called when nothing is buildable or in flight. A ticket
-    is stuck by its label (`needs-a-human`, `waiting`, `agent:blocked`), a
-    blocker closed by hand or that doesn't exist, a cycle, or a stuck blocker."""
-    unbuilt = {n: i for n, i in everything.items()
-               if i["state"] == "open" and BUILT not in label_names(i)}
-    own: dict[int, str] = {}  # what holds a ticket back by itself
-    deps: dict[int, list[int]] = {}  # its blockers among the unbuilt tickets
-    outside: dict[int, list[int]] = {}  # its open blockers outside the spec
-    for number, issue in unbuilt.items():
-        names = label_names(issue)
-        deps[number], outside[number] = [], []
-        reasons = [_STUCK[label] for label in base.STALE if label in names]
-        for b in blockers(issue.get("body")):
-            if landed(b):
-                continue
-            if b in unbuilt:
-                deps[number].append(b)
-            elif b in everything and everything[b]["state"] != "open":
-                reasons.append(f"blocked by #{b}, which was closed by hand")
-            elif b in everything:
-                pass  # built: landed
-            elif b in landed.missing:
-                reasons.append(f"blocked by #{b}, which doesn't exist")
-            else:
-                outside[number].append(b)
-        if reasons:
-            own[number] = "; ".join(reasons)
-
-    def reaches(start: int, goal: int) -> bool:
-        seen, todo = set(), list(deps[start])
-        while todo:
-            n = todo.pop()
-            if n == goal:
-                return True
-            if n not in seen:
-                seen.add(n)
-                todo.extend(deps[n])
-        return False
-
-    cyclic = {n for n in unbuilt if reaches(n, n)}
-    moving: dict[int, bool] = {}
-
-    def can_move(n: int) -> bool:
-        # Only waiting on outside issues, through tickets that can move too.
-        if n not in moving:
-            moving[n] = False  # guards a cycle while it's worked out
-            moving[n] = (n not in own and n not in cyclic
-                         and all(can_move(d) for d in deps[n]))
-        return moving[n]
-
-    if any(can_move(n) for n in unbuilt):
-        return None
-    lines = [f"- #{n} {unbuilt[n]['title']}: {own[n]}" for n in sorted(own)]
-    if cyclic:
-        listed = ", ".join(f"#{n}" for n in sorted(cyclic))
-        lines.append(f"- {listed}: each waits on another in a cycle of `## Blocked by` references")
-    for n in sorted(unbuilt):
-        if n not in own and n not in cyclic:
-            waits = ", ".join(f"#{d}" for d in sorted(deps[n]))
-            lines.append(f"- #{n} {unbuilt[n]['title']}: waits on {waits}")
-    if not unbuilt:
-        lines = [f"- #{n} {i['title']}: closed by hand" for n, i in sorted(everything.items())
-                 if i["state"] != "open"]
-    return lines
 
 
 def _queue_spec_review(ctx: Context, workflow: sqlite3.Row) -> None:
@@ -788,36 +664,6 @@ def _spec_tickets(ctx: Context, workflow: sqlite3.Row) -> dict[int, dict[str, An
     label = spec_label(workflow["subject"])
     return {i["number"]: i for i in ctx.github.issues_with_label(workflow["repo"], label)
             if "pull_request" not in i}
-
-
-class Landed:
-    """Whether a blocker has landed: a ticket of the spec (`everything`) once
-    it's open and `agent:built`, any other issue once it's closed. An issue
-    that doesn't exist never has; it's in `missing` once asked about."""
-
-    def __init__(self, ctx: Context, repo: str, everything: dict[int, dict[str, Any]]):
-        self._ctx, self._repo, self._everything = ctx, repo, everything
-        self._outside: dict[int, bool] = {}
-        self.missing: set[int] = set()
-
-    def __call__(self, number: int) -> bool:
-        if number in self._everything:
-            issue = self._everything[number]
-            return issue["state"] == "open" and BUILT in label_names(issue)
-        if number not in self._outside:
-            try:
-                state = self._ctx.github.get_issue(self._repo, number)["state"]
-                self._outside[number] = state == "closed"
-            except GitHubError as e:
-                if e.status not in (404, 410):
-                    raise
-                self._outside[number] = False
-                self.missing.add(number)
-        return self._outside[number]
-
-
-def _landed(ctx: Context, repo: str, everything: dict[int, dict[str, Any]]) -> Landed:
-    return Landed(ctx, repo, everything)
 
 
 def start_ticket(
@@ -863,8 +709,8 @@ def start_ticket(
     ctx = Context(conn, github, settings)
     if number in queue(ctx, workflow, prefer=(number, triggered_by)):
         return workflow["id"]
-    everything = _spec_tickets(ctx, workflow)
-    landed = _landed(ctx, repo, everything)
+    all_tickets = _spec_tickets(ctx, workflow)
+    landed = Landed(ctx, repo, all_tickets)
     waiting = [b for b in blockers(issue.get("body")) if not landed(b)]
     if waiting:
         listed = ", ".join(f"#{b}" for b in waiting)
@@ -939,7 +785,7 @@ def _decomposed(
     repo, spec = run["repo"], int(run["ticket"])
     label = spec_label(spec)
     ctx.github.create_label(repo, label, SPEC_LABEL_COLOR, f"A ticket of spec #{spec}")
-    numbers = made_by(ctx.github.issues_with_label(repo, label), run["id"])
+    numbers = tickets_made_by(ctx.github.issues_with_label(repo, label), run["id"])
     for index, ticket in enumerate(breakdown):
         if index in numbers:
             continue
@@ -947,7 +793,7 @@ def _decomposed(
         body = render_ticket(run["id"], index, spec, ticket, blockers)
         numbers[index] = ctx.github.create_issue(repo, ticket["title"], body, [label])
         log.info("auto-tickets run %s: created %s#%s (ticket %s of %s)", run["id"], repo,
-                 numbers[index], index + 1, len(breakdown), extra=_about(run))
+                 numbers[index], index + 1, len(breakdown), extra=about_row(run))
     if not _create_integration_branch(ctx, run, workflow):
         return
     listed = "\n".join(f"{i + 1}. #{numbers[i]}" for i in range(len(breakdown)))
@@ -979,14 +825,14 @@ def _create_integration_branch(ctx: Context, run: sqlite3.Row, workflow: sqlite3
             [run["triggered_by"]] if run["triggered_by"] else None))
         base.end(ctx, workflow, base.STOPPED, spec, "needs-a-human")
         log.info("%s#%s: %s already exists elsewhere; workflow stopped", repo, spec, branch,
-                 extra=_about(run))
+                 extra=about_row(run))
         return False
     spec_hash = body_hash(ctx.github.get_issue(repo, spec).get("body"))
     with ctx.conn:
         ctx.conn.execute("UPDATE workflows SET branch = ?, spec_hash = ? WHERE id = ?",
                          (branch, spec_hash, workflow["id"]))
     log.info("auto-tickets run %s: created %s at %s for %s#%s", run["id"], branch, base_sha,
-             repo, spec, extra=_about(run))
+             repo, spec, extra=about_row(run))
     return True
 
 
@@ -999,35 +845,4 @@ def _needs_a_human(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, commen
         f"**Verdict:** `needs-a-human`\n\n{comment.strip()}\n\n"
         f"---\nFactory run {run['id']} · [runner log]({link})\n"))
     base.end(ctx, workflow, base.STOPPED, spec, "needs-a-human")
-    log.info("auto-tickets run %s: %s#%s needs a human", run["id"], repo, spec, extra=_about(run))
-
-
-def made_by(issues: list[dict[str, Any]], run_id: int) -> dict[int, int]:
-    """The tickets auto-tickets run `run_id` has already created: index -> issue number."""
-    found: dict[int, int] = {}
-    for issue in issues:
-        for run, index in _MARKER.findall(issue.get("body") or ""):
-            if int(run) == run_id:
-                found.setdefault(int(index), issue["number"])
-    return found
-
-
-def render_ticket(
-    run_id: int, index: int, spec: int, ticket: dict[str, Any], blockers: list[int]
-) -> str:
-    """A ticket's issue body, in /to-tickets' template. Blockers are plain issue
-    references, never GitHub's blocking links; the checkboxes are never ticked."""
-    related = "".join(f"\n\nRelated: #{m}" for m in ticket.get("related", []))
-    criteria = "\n".join(f"- [ ] {c}" for c in ticket["acceptance_criteria"])
-    blocked_by = "\n".join(f"- #{n}" for n in blockers) or "None (can start immediately)"
-    return (
-        f"<!-- factory:auto-tickets run={run_id} index={index} -->\n"
-        f"## Parent\n\n#{spec}\n\n"
-        f"## What to build\n\n{ticket['what_to_build'].strip()}{related}\n\n"
-        f"## Acceptance criteria\n\n{criteria}\n\n"
-        f"## Blocked by\n\n{blocked_by}\n"
-    )
-
-
-def _about(run: sqlite3.Row) -> dict[str, Any]:
-    return about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"])
+    log.info("auto-tickets run %s: %s#%s needs a human", run["id"], repo, spec, extra=about_row(run))

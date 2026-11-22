@@ -19,7 +19,7 @@ from factory import attempts, loop, review, tickets
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub
-from factory.logs import about_run
+from factory.logs import about_row, about_run
 from factory.workflows import base
 from factory.workflows.base import Context
 
@@ -107,7 +107,7 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
         review.publish(ctx.github, run["repo"], number, run["id"], json.loads(run["result"]), link)
         base.end(ctx, workflow, base.DONE, number)
         log.info("findings-only review run %s posted on %s#%s", run["id"], run["repo"], number,
-                 extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+                 extra=about_row(run))
 
 
 def _give_up(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:

@@ -26,7 +26,7 @@ from factory import enrolment as enrolments
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub
-from factory.logs import about_run
+from factory.logs import about_row, about_run
 from factory.workflows import base
 from factory.workflows.base import Context
 
@@ -295,7 +295,7 @@ def _branch_moved(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None
     assert run is not None
     log.info("review run %s: %s moved while it ran; its fixes were discarded", run["id"],
              json.loads(run["dispatch"])["branch"],
-             extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+             extra=about_row(run))
     if attempts.retry(ctx.conn, run) is None:
         give_up(ctx, run, workflow)
 
@@ -453,12 +453,12 @@ def ticket_changed(
     rest = rendered[len(head):]
     if rest and not rest.startswith("\n## "):
         return True
-    since = _when(run["created_at"])  # when its ticket.md was rendered
+    since = _parse_time(run["created_at"])  # when its ticket.md was rendered
     app = ctx.github.app_login()
-    return any(_when(c.created_at) > since for c in ticket.comments if c.author != app)
+    return any(_parse_time(c.created_at) > since for c in ticket.comments if c.author != app)
 
 
-def _when(iso: str) -> datetime:
+def _parse_time(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from factory import attempts, bundles
 from factory.enrolment import Enrolment
 from factory.github import GitHub
-from factory.logs import about_run
+from factory.logs import about_row
 from factory.tickets import render_notice
 from factory.workflows import base
 from factory.workflows import implement_spec, implement_ticket, review_pr
@@ -108,7 +108,7 @@ def _lost(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, why: bundles.Lo
     ticket stops alone; the spec's queue goes on without it. Any other
     workflow stops."""
     log.error("run %s: its commits are lost: %s", run["id"], why,
-              extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+              extra=about_row(run))
     repo, number = run["repo"], int(run["ticket"])
     trigger = "agent:review" if run["task"] == "review" else "agent:implement"
     ctx.github.post_comment(repo, number, render_notice(

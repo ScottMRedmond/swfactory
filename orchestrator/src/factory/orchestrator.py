@@ -25,7 +25,7 @@ from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
-from factory.logs import about_run
+from factory.logs import about_row
 from factory.runner import Runner
 from factory.tickets import render_notice
 from factory.workflows import implement_spec, implement_ticket
@@ -216,12 +216,9 @@ def cancel_closed(
         subjects = [row["ticket"], json.loads(row["dispatch"]).get("pr_number")]
         if any(s is not None and closed(str(s)) for s in subjects):
             log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"],
-                     extra=_about(row))
+                     extra=about_row(row))
             loop.request_cancel(conn, row["id"])
 
-
-def _about(row: sqlite3.Row) -> dict[str, Any]:
-    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
 
 # --- polling -------------------------------------------------------------------
@@ -487,7 +484,7 @@ def handle_finished(
             workflows.on_result(ctx, row)
         except (GitHubError, OSError) as e:
             log.error("run %s: writing the result to GitHub failed: %s", row["id"], e,
-                      extra=_about(row))
+                      extra=about_row(row))
             continue
         with conn:
             conn.execute(

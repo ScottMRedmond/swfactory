@@ -21,7 +21,7 @@ from typing import Any
 
 from factory import loop, review
 from factory import state as db_state
-from factory.logs import about_run
+from factory.logs import about_row, about_run
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def not_an_attempt(conn: sqlite3.Connection, run: sqlite3.Row) -> bool:
     reason = failure(run)
     if reason not in NOT_ATTEMPTS:
         return False
-    about = about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"])
+    about = about_row(run)
     if reason == "contract_mismatch":
         if not dispatch_paused(conn):
             log.error("run %s failed with contract_mismatch: the runner doesn't accept this "

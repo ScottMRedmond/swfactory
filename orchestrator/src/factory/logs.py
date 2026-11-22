@@ -32,6 +32,11 @@ def about_run(*, id: int, repo: str, ticket: str | None = None) -> dict[str, Any
     return {"run": id, "repo": repo, "ticket": ticket}
 
 
+def about_row(row: Any) -> dict[str, Any]:
+    """The `extra` for a log call about a `runs` row."""
+    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         line: dict[str, Any] = {
