@@ -14,7 +14,7 @@
 // status 0 as soon as Claude Code starts (seen with 2.1.330 under Docker
 // Desktop), while it carries on in the container.
 
-import { spawnSync } from "node:child_process";
+import { run } from "./spawn";
 
 export const AGENT_DIR = "/home/agent/factory";
 export const OUTPUT = `${AGENT_DIR}/output.json`;
@@ -50,11 +50,7 @@ export const takeClaudeToken = (): string | undefined => {
   return token;
 };
 
-const docker = (args: string[], input?: string, env?: NodeJS.ProcessEnv) => {
-  const proc = spawnSync("docker", args, { encoding: "utf8", input, env, maxBuffer: 256 * 1024 * 1024 });
-  if (proc.error) throw proc.error;
-  return { status: proc.status ?? 1, stdout: String(proc.stdout ?? ""), stderr: String(proc.stderr ?? "") };
-};
+const docker = (args: string[], input?: string, env?: NodeJS.ProcessEnv) => run("docker", args, { input, env });
 
 const quote = (arg: string) => `'${arg.replace(/'/g, `'\\''`)}'`;
 

@@ -25,11 +25,12 @@
 //   FACTORY_TARGET_URL  where to fetch the target from (default
 //                       https://github.com/<repo>.git; tests use a local path)
 //   FACTORY_BUILD_CACHE "gha" to build with the GitHub Actions layer cache
+//   FACTORY_IMAGE_PREFIX the image's name before -<run_id> (default
+//                       factory-run; tests make it unique per process)
 //
 // Exit code: 0 when the run succeeded, 1 when it failed (result.json says
 // why), 2 when it couldn't write a valid result.json at all.
 
-import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -43,6 +44,7 @@ import type { Check, Dispatch, Failure, Result, TriggeredBy } from "./contract-t
 import { loadContracts, type Contract, type Contracts } from "./contract";
 import { withPreviousAttempt } from "./previous-attempt";
 import { expandIncludes } from "./prompt-includes";
+import { CommandFailed, mustRun as must, run, type RunOptions } from "./spawn";
 import { blockersFirst } from "./tasks/auto-tickets/output";
 import * as review from "./tasks/review/review";
 
@@ -59,29 +61,14 @@ class RunFailure extends Error {
 
 const log = (message: string) => console.log(`[factory] ${message}`);
 
-const run = (
-  command: string,
-  args: string[],
-  options: SpawnSyncOptions = {},
-): { status: number; output: string } => {
-  const proc = spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 256 * 1024 * 1024,
-    ...options,
-  });
-  if (proc.error) throw proc.error;
-  return {
-    status: proc.status ?? 1,
-    output: String(proc.stdout ?? "") + String(proc.stderr ?? ""),
-  };
-};
-
-const mustRun = (failure: Failure, command: string, args: string[], options: SpawnSyncOptions = {}) => {
-  const result = run(command, args, options);
-  if (result.status !== 0) {
-    throw new RunFailure(failure, `${command} ${args.join(" ")} failed:\n${result.output}`);
+// Runs a command that must succeed; if it doesn't, the run fails with `failure`.
+const mustRun = (failure: Failure, command: string, args: string[], options: RunOptions = {}) => {
+  try {
+    return must(command, args, options).stdout;
+  } catch (error) {
+    if (error instanceof CommandFailed) throw new RunFailure(failure, error.message);
+    throw error;
   }
-  return result.output;
 };
 
 // The last 50 lines of a command's output, trimmed to fit the schema.
@@ -118,11 +105,11 @@ const checkout = (dispatch: Dispatch, work: string) => {
     dispatch.base_sha, dispatch.enrolment_sha, ...(dispatch.pr_base_sha ? [dispatch.pr_base_sha] : []),
   ]);
   mustRun("setup_failed", "git", ["-C", target, "checkout", "-q", "--detach", dispatch.base_sha]);
-  const archive = spawnSync("git", ["-C", target, "archive", dispatch.enrolment_sha, ".factory"]);
+  const archive = run("git", ["-C", target, "archive", dispatch.enrolment_sha, ".factory"]);
   if (archive.status !== 0) {
     throw new RunFailure("setup_failed", `no .factory/ at ${dispatch.enrolment_sha}:\n${archive.stderr}`);
   }
-  mustRun("setup_failed", "tar", ["-x", "-C", enrolment], { input: archive.stdout });
+  mustRun("setup_failed", "tar", ["-x", "-C", enrolment], { input: archive.bytes });
   return { target, factoryDir: join(enrolment, ".factory") };
 };
 
@@ -142,7 +129,7 @@ const readEnrolment = (contract: Contract, factoryDir: string): Enrolment => {
 
 // Step 3: build the enrolment's Dockerfile, with .factory/ as the context.
 const buildImage = (dispatch: Dispatch, factoryDir: string): string => {
-  const tag = `factory-run-${dispatch.run_id}`;
+  const tag = `${process.env.FACTORY_IMAGE_PREFIX ?? "factory-run"}-${dispatch.run_id}`;
   const cache =
     process.env.FACTORY_BUILD_CACHE === "gha"
       ? ["--cache-from", "type=gha,scope=factory-enrolment", "--cache-to", "type=gha,mode=max,scope=factory-enrolment"]

@@ -6,44 +6,15 @@
 // The enrolment's image builds FROM $FACTORY_BASE_IMAGE (default
 // factory-base:test, from `npm run build:image`).
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const baseImage = process.env.FACTORY_BASE_IMAGE ?? "factory-base:test";
-
-const git = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-
-type Files = Record<string, string>;
-
-// A bare repo standing in for the target on GitHub. Each call to commit()
-// adds a commit with the given files and returns its sha.
-const makeTarget = () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-target-"));
-  const bare = join(dir, "target.git");
-  const work = join(dir, "work");
-  git(dir, "init", "-q", "--bare", "-b", "main", bare);
-  git(dir, "init", "-q", "-b", "main", work);
-  git(work, "remote", "add", "origin", bare);
-  git(work, "config", "user.email", "test@example.com");
-  git(work, "config", "user.name", "test");
-  const commit = (files: Files): string => {
-    for (const [path, content] of Object.entries(files)) {
-      mkdirSync(dirname(join(work, path)), { recursive: true });
-      writeFileSync(join(work, path), content);
-    }
-    git(work, "add", "-A");
-    git(work, "commit", "-q", "-m", "change");
-    git(work, "push", "-q", "origin", "HEAD:main");
-    return git(work, "rev-parse", "HEAD");
-  };
-  return { url: bare, commit };
-};
+import {
+  FACTORY, baseImage, bot, claudeEnv, event, fakeClaude, git, makeTarget, root, runTask, success, writeOutput,
+  type Files, type Run,
+} from "./testing";
 
 const enrolment = (config: string): Files => ({
   ".factory/Dockerfile": `FROM ${baseImage}\n`,
@@ -60,35 +31,6 @@ const smokeDispatch = (sha: string, extra: object = {}) => ({
   timeout_minutes: 20,
   ...extra,
 });
-
-type Run = { status: number; output: string; out: string; result?: any };
-
-const runTask = (dispatch: unknown, targetUrl: string, env: NodeJS.ProcessEnv = {}): Run => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-run-"));
-  const dispatchPath = join(dir, "dispatch.json");
-  writeFileSync(
-    dispatchPath,
-    typeof dispatch === "string" ? dispatch : JSON.stringify(dispatch),
-  );
-  const out = join(dir, "out");
-  const work = join(dir, "work");
-  const proc = spawnSync(
-    "npx",
-    ["tsx", join(root, "runner/run-task.ts"), dispatchPath, out, work],
-    {
-      cwd: root,
-      encoding: "utf8",
-      env: { ...process.env, FACTORY_TARGET_URL: targetUrl, ...env },
-    },
-  );
-  const resultPath = join(out, "result.json");
-  return {
-    status: proc.status ?? -1,
-    output: proc.stdout + proc.stderr,
-    out,
-    result: existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : undefined,
-  };
-};
 
 describe("a smoke run", () => {
   it("builds the image, runs setup and the check, and writes a succeeded result", () => {
@@ -257,25 +199,7 @@ describe("the dispatch", () => {
 });
 
 // The agent tasks run Claude Code in the container. These tests swap it for
-// a fake `claude` (a bash script in the enrolment, copied over the real one),
-// so no Claude usage is spent. The fake finds its files where the prompt
-// says: the task's folder is /home/agent/factory, the repo is the workspace.
-const FACTORY = "/home/agent/factory";
-
-const fakeClaude = (script: string, config = "setup: \"true\"\ncheck: echo checked\n"): Files => ({
-  ".factory/Dockerfile": `FROM ${baseImage}\nCOPY --chmod=755 fake-claude /usr/local/bin/claude\n`,
-  ".factory/config.yml": config,
-  ".factory/fake-claude": `#!/bin/bash\nset -u\n${script}\n`,
-});
-
-// One stream-json line as Claude Code prints it.
-const event = (data: object) => `echo '${JSON.stringify({ session_id: "s-1", ...data })}'`;
-const success = event({ type: "result", subtype: "success", is_error: false, result: "done" });
-
 const implementOutput = { verdict: "built", pr_body: "Built it." };
-const writeOutput = (output: unknown) =>
-  `cat > ${FACTORY}/output.json <<'JSON'\n${typeof output === "string" ? output : JSON.stringify(output)}\nJSON`;
-
 const implementDispatch = (sha: string, extra: object = {}) => ({
   contract_version: 1,
   run_id: 414,
@@ -291,13 +215,6 @@ const implementDispatch = (sha: string, extra: object = {}) => ({
   triggered_by: { login: "octocat", id: 583231 },
   ...extra,
 });
-
-// What run.yml gives the script: the Claude token and the App's bot identity.
-const bot = {
-  FACTORY_BOT_NAME: "swfactory[bot]",
-  FACTORY_BOT_EMAIL: "1234+swfactory[bot]@users.noreply.github.com",
-};
-const claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token", ...bot };
 
 describe("the agent step", () => {
   it("runs the agent and puts its output.json in a succeeded result", () => {
