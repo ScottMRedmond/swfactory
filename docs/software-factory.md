@@ -143,7 +143,7 @@ Both sides validate against the schemas, and the schemas are the only source of 
 
 How the orchestrator responds to `contract_mismatch`, `claude_auth` and `usage_limit` is in [Failures that aren't attempts](orchestrator.md#dispatching-and-collecting).
 
-Language types are generated from the schemas or tested against them, never written independently. On the orchestrator side they're pydantic models, tested against the schemas' examples. On the task side they're TypeScript types in `runner/contract-types.ts`, whose keys, required keys and literal values are tied to constants by the compiler, and those constants to the schemas by a test.
+Language types are generated from the schemas or tested against them, never written independently. On the orchestrator side they're pydantic models, tested against the schemas' examples. On the task side they're TypeScript types generated from the schemas into `runner/contracts.generated.ts` (`npm run gen:contracts`; a test fails while the committed file is stale), which `runner/contract-types.ts` re-exports under the names the runner uses.
 
 ## Tasks
 

@@ -40,7 +40,7 @@ import {
   AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, takeClaudeToken, type AgentOutcome,
 } from "./agent";
 import { botIdentity, bundleBranch, openBranch, type Identity } from "./commits";
-import type { Check, Dispatch, Failure, Result, TriggeredBy } from "./contract-types";
+import type { Check, Dispatch, Failure, Output, Result, TriggeredBy } from "./contract-types";
 import { loadContracts, type Contract, type Contracts } from "./contract";
 import { withPreviousAttempt } from "./previous-attempt";
 import { expandIncludes } from "./prompt-includes";
@@ -255,7 +255,7 @@ const runTask = (
   let check: Check | undefined;
   let checkBefore: Check | undefined;
   let instructionsChanged = false;
-  let output: object | undefined;
+  let output: Output | undefined;
   let container: ReturnType<typeof startContainer> | undefined;
   let enrolment: Enrolment | undefined;
   let branch: { name: string; identity: Identity; triggeredBy: TriggeredBy } | undefined;

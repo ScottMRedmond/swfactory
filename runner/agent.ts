@@ -22,9 +22,9 @@ export const TICKET = `${AGENT_DIR}/ticket.md`;
 // The dispatch's older open issues (explore, auto-tickets), one "- #N title" line each.
 export const OLDER_ISSUES = `${AGENT_DIR}/older-issues.md`;
 
-import type { AgentFailure } from "./contract-types";
+import type { AgentFailure, Output } from "./contract-types";
 
-export type AgentOutcome = { output: object } | { failure: AgentFailure; reason: string };
+export type AgentOutcome = { output: Output } | { failure: AgentFailure; reason: string };
 
 export type AgentOptions = {
   container: string;
@@ -145,7 +145,7 @@ const classify = (session: Session): { failure: AgentFailure; reason: string } |
   return null;
 };
 
-type Read = { output: object } | { missing: true } | { errors: string };
+type Read = { output: Output } | { missing: true } | { errors: string };
 
 const readOutput = (options: AgentOptions): Read => {
   const file = docker(["exec", options.container, "cat", OUTPUT]);
@@ -157,7 +157,7 @@ const readOutput = (options: AgentOptions): Read => {
     return { errors: `output.json isn't JSON: ${error}` };
   }
   const errors = options.validate(data);
-  return errors ? { errors } : { output: data as object };
+  return errors ? { errors } : { output: data as Output };
 };
 
 const fixPrompt = (errors: string) =>
