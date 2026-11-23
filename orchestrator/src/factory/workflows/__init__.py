@@ -17,6 +17,7 @@ on every workflow that has them, through this module:
   (`start_review`).
 """
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable
@@ -104,22 +105,23 @@ def on_result(ctx: Context, run: sqlite3.Row) -> None:
 
 def _lost(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, why: bundles.Lost) -> None:
     """A run whose commits are gone for good is handled once: a notice saying
-    how to run it again, and `needs-a-human` on its ticket (or PR). A spec's
-    ticket stops alone; the spec's queue goes on without it. Any other
-    workflow stops."""
+    how to run it again, and `needs-a-human`, on its ticket (a review's: on
+    its PR). A spec's ticket stops alone; the spec's queue goes on without
+    it. Any other workflow stops."""
     log.error("run %s: its commits are lost: %s", run["id"], why,
               extra=about_row(run))
-    repo, number = run["repo"], int(run["ticket"])
-    trigger = "agent:review" if run["task"] == "review" else "agent:implement"
+    repo, subject = run["repo"], int(workflow["subject"])
+    review = run["task"] == "review"
+    number = json.loads(run["dispatch"])["pr_number"] if review else int(run["ticket"])
     ctx.github.post_comment(repo, number, render_notice(
         f"Factory run {run['id']} finished, but its commits were lost: the factory's git store "
         "no longer has them and the runner's files have expired. Nothing was pushed. Add "
-        f"`{trigger}` again to run it again."))
+        f"`{'agent:review' if review else 'agent:implement'}` again to run it again."))
+    ctx.github.add_labels(repo, number, ["needs-a-human"])
     if workflow["kind"] == implement_spec.KIND and run["task"] == "implement":
-        ctx.github.add_labels(repo, number, ["needs-a-human"])
         ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     elif workflow["status"] == base.ACTIVE:
-        base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
+        base.end(ctx, workflow, base.STOPPED, subject)
 
 
 def prepare(ctx: Context, run: sqlite3.Row) -> dict[str, Any] | None:
