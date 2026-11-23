@@ -3,16 +3,18 @@
 // "Runners" in docs/software-factory.md.
 //
 // The agent gets the Claude token and nothing else from the runner's
-// environment: `docker exec -e CLAUDE_CODE_OAUTH_TOKEN` copies that one
-// variable from this process, by name, so its value isn't on a command line
-// either. Setup and the check never get it.
+// environment. The run script takes the token out of its own environment
+// before anything runs (`takeClaudeToken`) and hands it here; only the
+// agent's `docker exec -e CLAUDE_CODE_OAUTH_TOKEN` gets it, by name in that
+// one command's environment, so its value isn't on a command line either.
+// Setup, the check, git and every other command never get it.
 //
 // Claude Code runs detached (`docker exec -d`) with its output in a file,
 // polled until it exits. Run attached, `docker exec` returns at once with
 // status 0 as soon as Claude Code starts (seen with 2.1.330 under Docker
 // Desktop), while it carries on in the container.
 
-import { spawnSync } from "node:child_process";
+import { run } from "./spawn";
 
 export const AGENT_DIR = "/home/agent/factory";
 export const OUTPUT = `${AGENT_DIR}/output.json`;
@@ -20,18 +22,14 @@ export const TICKET = `${AGENT_DIR}/ticket.md`;
 // The dispatch's older open issues (explore, auto-tickets), one "- #N title" line each.
 export const OLDER_ISSUES = `${AGENT_DIR}/older-issues.md`;
 
-export type AgentFailure =
-  | "agent_error"
-  | "agent_timeout"
-  | "no_output"
-  | "invalid_output"
-  | "claude_auth"
-  | "usage_limit";
+import type { AgentFailure } from "./contract-types";
 
 export type AgentOutcome = { output: object } | { failure: AgentFailure; reason: string };
 
 export type AgentOptions = {
   container: string;
+  // The Claude token (`takeClaudeToken`), or undefined if there's none.
+  token: string | undefined;
   workspace: string;
   model: string;
   prompt: string;
@@ -44,11 +42,15 @@ const log = (message: string) => console.log(`[factory] ${message}`);
 
 const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-const docker = (args: string[], input?: string) => {
-  const proc = spawnSync("docker", args, { encoding: "utf8", input, maxBuffer: 256 * 1024 * 1024 });
-  if (proc.error) throw proc.error;
-  return { status: proc.status ?? 1, stdout: String(proc.stdout ?? ""), stderr: String(proc.stderr ?? "") };
+// Removes the Claude token from this process's environment, so no command it
+// runs inherits it, and returns it for the agent alone.
+export const takeClaudeToken = (): string | undefined => {
+  const token = process.env.CLAUDE_CODE_OAUTH_TOKEN || undefined;
+  delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  return token;
 };
+
+const docker = (args: string[], input?: string, env?: NodeJS.ProcessEnv) => run("docker", args, { input, env });
 
 const quote = (arg: string) => `'${arg.replace(/'/g, `'\\''`)}'`;
 
@@ -73,10 +75,11 @@ const runSession = (options: AgentOptions, n: number, args: string[], prompt: st
   const claude = ["claude", ...args].map(quote).join(" ");
   const script = `timeout -k 10 ${seconds} ${claude} < ${promptFile} > ${transcript} 2>&1; echo $? > ${exitFile}`;
   log(`agent session ${n}: claude ${args.join(" ")} (${seconds}s left)`);
-  const start = docker([
-    "exec", "-d", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-w", options.workspace,
-    container, "bash", "-c", script,
-  ]);
+  const start = docker(
+    ["exec", "-d", "-e", "CLAUDE_CODE_OAUTH_TOKEN", "-w", options.workspace, container, "bash", "-c", script],
+    undefined,
+    { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: options.token },
+  );
   if (start.status !== 0) throw new Error(`can't start the agent: ${start.stderr}`);
 
   let printed = 0;
@@ -170,7 +173,7 @@ const fixPrompt = (errors: string) =>
 // Runs the agent with the prompt, and gives it one more turn in the same
 // session if its output.json fails the schema.
 export const runAgent = (options: AgentOptions): AgentOutcome => {
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+  if (!options.token) {
     return { failure: "claude_auth", reason: "CLAUDE_CODE_OAUTH_TOKEN isn't set" };
   }
   const deadline = Date.now() + options.timeoutSeconds * 1000;

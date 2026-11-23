@@ -13,14 +13,13 @@
 //   FACTORY_BOT_NAME   the App's bot login, e.g. my-factory[bot]
 //   FACTORY_BOT_EMAIL  its noreply address, <bot user id>+<login>@users.noreply.github.com
 
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_DIR } from "./agent";
+import type { TriggeredBy } from "./contract-types";
+import { run } from "./spawn";
 
 export const BUNDLE = "branch.bundle";
-
-export type TriggeredBy = { login: string; id: number };
 
 export type Identity = { name: string; email: string };
 
@@ -28,20 +27,12 @@ const log = (message: string) => console.log(`[factory] ${message}`);
 
 // Runs a bash script in the workspace with positional arguments, so nothing
 // from the dispatch is pasted into the script.
-const bash = (container: string, workspace: string, env: Record<string, string>, script: string, args: string[]) => {
-  const proc = spawnSync(
-    "docker",
-    [
-      "exec", "-w", workspace,
-      ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-      container, "bash", "-c", `set -euo pipefail\n${script}`, "bash", ...args,
-    ],
-    { encoding: "utf8" },
-  );
-  if (proc.error) throw proc.error;
-  const stdout = String(proc.stdout ?? "");
-  return { status: proc.status ?? 1, stdout, output: stdout + String(proc.stderr ?? "") };
-};
+const bash = (container: string, workspace: string, env: Record<string, string>, script: string, args: string[]) =>
+  run("docker", [
+    "exec", "-w", workspace,
+    ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
+    container, "bash", "-c", `set -euo pipefail\n${script}`, "bash", ...args,
+  ]);
 
 // The bot identity from the environment, or an error saying what's missing.
 export const botIdentity = (): Identity | string => {
@@ -108,7 +99,7 @@ echo "$count"
   if (result.status !== 0) throw new Error(`can't bundle ${options.branch}: ${result.output}`);
   const count = Number(result.stdout.trim());
   if (count > 0) {
-    const copy = spawnSync("docker", ["cp", `${container}:${inContainer}`, join(options.outDir, BUNDLE)], { encoding: "utf8" });
+    const copy = run("docker", ["cp", `${container}:${inContainer}`, join(options.outDir, BUNDLE)]);
     if (copy.status !== 0 || !existsSync(join(options.outDir, BUNDLE))) {
       throw new Error(`can't copy the bundle out: ${copy.stderr}`);
     }

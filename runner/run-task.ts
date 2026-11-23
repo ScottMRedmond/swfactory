@@ -17,102 +17,58 @@
 //
 //   GITHUB_TOKEN        read-only token used to fetch the target, passed to
 //                       git per command and never written to .git/config
-//   CLAUDE_CODE_OAUTH_TOKEN  the Claude token, passed to the agent only
+//   CLAUDE_CODE_OAUTH_TOKEN  the Claude token: taken out of this process's
+//                       environment at the start and passed to the agent's
+//                       `docker exec` only
 //   FACTORY_BOT_NAME, FACTORY_BOT_EMAIL  the App's bot identity, which
 //                       authors the agent's commits (implement and review)
 //   FACTORY_TARGET_URL  where to fetch the target from (default
 //                       https://github.com/<repo>.git; tests use a local path)
 //   FACTORY_BUILD_CACHE "gha" to build with the GitHub Actions layer cache
+//   FACTORY_IMAGE_PREFIX the image's name before -<run_id> (default
+//                       factory-run; tests make it unique per process)
 //
 // Exit code: 0 when the run succeeded, 1 when it failed (result.json says
 // why), 2 when it couldn't write a valid result.json at all.
 
-import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, type AgentOutcome } from "./agent";
-import { botIdentity, bundleBranch, openBranch, type Identity, type TriggeredBy } from "./commits";
+import {
+  AGENT_DIR, OLDER_ISSUES, OUTPUT, TICKET, putFile, runAgent, takeClaudeToken, type AgentOutcome,
+} from "./agent";
+import { botIdentity, bundleBranch, openBranch, type Identity } from "./commits";
+import type { Check, Dispatch, Failure, Result, TriggeredBy } from "./contract-types";
 import { loadContracts, type Contract, type Contracts } from "./contract";
-import { withPreviousAttempt, type PreviousAttempt } from "./previous-attempt";
+import { withPreviousAttempt } from "./previous-attempt";
 import { expandIncludes } from "./prompt-includes";
+import { CommandFailed, mustRun as must, run, type RunOptions } from "./spawn";
 import { blockersFirst } from "./tasks/auto-tickets/output";
 import * as review from "./tasks/review/review";
 
 const RUNNER = dirname(fileURLToPath(import.meta.url));
 
-type Dispatch = {
-  contract_version: number;
-  run_id: number;
-  repo: string;
-  task: string;
-  base_sha: string;
-  enrolment_sha: string;
-  timeout_minutes: number;
-  // Agent tasks only.
-  ticket_markdown?: string;
-  previous_attempt?: PreviousAttempt;
-  model?: string;
-  branch?: string;
-  triggered_by?: TriggeredBy;
-  older_issues?: { ticket: string; title: string }[];
-  // Review only.
-  pr_number?: number;
-  pr_base_sha?: string;
-  findings_only?: boolean;
-};
-
-type Check = { passed: boolean; output_tail: string };
-
-type Result = {
-  contract_version: number;
-  run_id: number;
-  task: string;
-  outcome: "succeeded" | "failed";
-  failure?: string;
-  check?: Check;
-  check_before?: Check;
-  check_after?: Check;
-  instructions_changed?: true;
-  output?: object;
-};
-
 const WORKSPACE = "/home/agent/workspace";
 
 // Raised when a step fails in a way that has a `failure` reason.
 class RunFailure extends Error {
-  constructor(readonly failure: string, message: string) {
+  constructor(readonly failure: Failure, message: string) {
     super(message);
   }
 }
 
 const log = (message: string) => console.log(`[factory] ${message}`);
 
-const run = (
-  command: string,
-  args: string[],
-  options: SpawnSyncOptions = {},
-): { status: number; output: string } => {
-  const proc = spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 256 * 1024 * 1024,
-    ...options,
-  });
-  if (proc.error) throw proc.error;
-  return {
-    status: proc.status ?? 1,
-    output: String(proc.stdout ?? "") + String(proc.stderr ?? ""),
-  };
-};
-
-const mustRun = (failure: string, command: string, args: string[], options: SpawnSyncOptions = {}) => {
-  const result = run(command, args, options);
-  if (result.status !== 0) {
-    throw new RunFailure(failure, `${command} ${args.join(" ")} failed:\n${result.output}`);
+// Runs a command that must succeed; if it doesn't, the run fails with `failure`.
+const mustRun = (failure: Failure, command: string, args: string[], options: RunOptions = {}) => {
+  try {
+    return must(command, args, options).stdout;
+  } catch (error) {
+    if (error instanceof CommandFailed) throw new RunFailure(failure, error.message);
+    throw error;
   }
-  return result.output;
 };
 
 // The last 50 lines of a command's output, trimmed to fit the schema.
@@ -149,11 +105,11 @@ const checkout = (dispatch: Dispatch, work: string) => {
     dispatch.base_sha, dispatch.enrolment_sha, ...(dispatch.pr_base_sha ? [dispatch.pr_base_sha] : []),
   ]);
   mustRun("setup_failed", "git", ["-C", target, "checkout", "-q", "--detach", dispatch.base_sha]);
-  const archive = spawnSync("git", ["-C", target, "archive", dispatch.enrolment_sha, ".factory"]);
+  const archive = run("git", ["-C", target, "archive", dispatch.enrolment_sha, ".factory"]);
   if (archive.status !== 0) {
     throw new RunFailure("setup_failed", `no .factory/ at ${dispatch.enrolment_sha}:\n${archive.stderr}`);
   }
-  mustRun("setup_failed", "tar", ["-x", "-C", enrolment], { input: archive.stdout });
+  mustRun("setup_failed", "tar", ["-x", "-C", enrolment], { input: archive.bytes });
   return { target, factoryDir: join(enrolment, ".factory") };
 };
 
@@ -173,7 +129,7 @@ const readEnrolment = (contract: Contract, factoryDir: string): Enrolment => {
 
 // Step 3: build the enrolment's Dockerfile, with .factory/ as the context.
 const buildImage = (dispatch: Dispatch, factoryDir: string): string => {
-  const tag = `factory-run-${dispatch.run_id}`;
+  const tag = `${process.env.FACTORY_IMAGE_PREFIX ?? "factory-run"}-${dispatch.run_id}`;
   const cache =
     process.env.FACTORY_BUILD_CACHE === "gha"
       ? ["--cache-from", "type=gha,scope=factory-enrolment", "--cache-to", "type=gha,mode=max,scope=factory-enrolment"]
@@ -262,7 +218,9 @@ const taskPrompt = (contract: Contract, task: string, enrolment: Enrolment): str
 
 // Step 4: the agent. Its timeout is the job's (capped at 60 like run.yml)
 // minus 5 minutes, so the steps after it still have time to run.
-const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment, container: string): AgentOutcome => {
+const agentStep = (
+  contract: Contract, dispatch: Dispatch, enrolment: Enrolment, container: string, token: string | undefined,
+): AgentOutcome => {
   if (dispatch.ticket_markdown !== undefined) {
     putFile(container, TICKET, withPreviousAttempt(dispatch.ticket_markdown, dispatch.previous_attempt));
   }
@@ -273,6 +231,7 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
   const minutes = Math.max(1, Math.min(dispatch.timeout_minutes, 60) - 5);
   return runAgent({
     container,
+    token,
     workspace: WORKSPACE,
     model: dispatch.model!,
     prompt: taskPrompt(contract, dispatch.task, enrolment),
@@ -283,14 +242,16 @@ const agentStep = (contract: Contract, dispatch: Dispatch, enrolment: Enrolment,
 };
 
 // The steps after the dispatch is accepted. It always returns a result.
-const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: string): Result => {
+const runTask = (
+  contract: Contract, dispatch: Dispatch, work: string, outDir: string, token: string | undefined,
+): Result => {
   const base = {
     contract_version: dispatch.contract_version,
     run_id: dispatch.run_id,
     task: dispatch.task,
   };
 
-  let failure: string | undefined;
+  let failure: Failure | undefined;
   let check: Check | undefined;
   let checkBefore: Check | undefined;
   let instructionsChanged = false;
@@ -326,7 +287,7 @@ const runTask = (contract: Contract, dispatch: Dispatch, work: string, outDir: s
       branch = { name: dispatch.branch, identity, triggeredBy: dispatch.triggered_by };
     }
     if (AGENT_TASKS.includes(dispatch.task)) {
-      const agent = agentStep(contract, dispatch, enrolment, container.id);
+      const agent = agentStep(contract, dispatch, enrolment, container.id, token);
       if ("failure" in agent) throw new RunFailure(agent.failure, agent.reason);
       output = agent.output;
     }
@@ -419,6 +380,8 @@ const accept = (
 };
 
 const main = (argv: string[]): number => {
+  // Before anything else runs, so no command inherits it.
+  const token = takeClaudeToken();
   const [dispatchPath, outDir, workArg] = argv;
   if (!dispatchPath || !outDir) {
     console.error("usage: run-task.ts <dispatch.json> <out-dir> [<work-dir>]");
@@ -435,7 +398,7 @@ const main = (argv: string[]): number => {
     const accepted = accept(contracts, readFileSync(dispatchPath, "utf8"));
     if ("dispatch" in accepted) {
       contract = accepted.contract;
-      result = runTask(contract, accepted.dispatch, work, outDir);
+      result = runTask(contract, accepted.dispatch, work, outDir, token);
     } else {
       result = accepted;
     }

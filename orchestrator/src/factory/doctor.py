@@ -186,13 +186,17 @@ def _smoke(conn, runner: Runner, repo: str, head: str, sleep, out) -> bool:
     }
     run_id = loop.enqueue(conn, repo=repo, task="smoke", dispatch=dispatch)
     try:
-        loop.dispatch_run(conn, runner, loop.get_run(conn, run_id))
+        # A running `factory serve` may dispatch it first; it then goes out once.
+        by_us = loop.dispatch_run(conn, runner, loop.get_run(conn, run_id))
     except RunnerUnavailable as e:
         loop.cancel(conn, runner, loop.get_run(conn, run_id))
         out(f"smoke run {run_id} couldn't be dispatched: {e}")
         return False
     row = loop.get_run(conn, run_id)
-    out(f"smoke run {run_id} dispatched: {row['log_url']}")
+    if by_us:
+        out(f"smoke run {run_id} dispatched: {row['log_url']}")
+    else:
+        out(f"smoke run {run_id} was dispatched by the running orchestrator")
     out("waiting for it to finish (Ctrl-C stops waiting; the orchestrator still collects it)...")
     while row["status"] != "done":
         sleep(WAIT_SECONDS)

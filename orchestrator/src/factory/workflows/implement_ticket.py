@@ -19,15 +19,14 @@ import logging
 import sqlite3
 from dataclasses import replace
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from factory import attempts, bundles, loop, review, tickets
 from factory import enrolment as enrolments
 from factory.contract import CONTRACT_VERSION
 from factory.enrolment import Enrolment
 from factory.github import GitHub
-from factory.runner import Runner
-from factory.logs import about_run
+from factory.logs import about_row, about_run
 from factory.workflows import base
 from factory.workflows.base import Context
 
@@ -124,7 +123,7 @@ def start_implement(
                             tickets.render_too_big_notice(str(e), triggered_by.login))
         workflow = base.get(conn, workflow_id)
         assert workflow is not None
-        base.end(Context(conn, github, cast(Runner, None), settings), workflow, "stopped", number)
+        base.end(Context(conn, github, settings), workflow, base.STOPPED, number)
         log.info("%s#%s is too big to dispatch: %s", repo, ticket, e)
         return None
     log.info("queued implement run %s for %s#%s", run_id, repo, ticket,
@@ -161,26 +160,9 @@ def cancel_closed_prs(
     ticket if it's still open. Its review's rows are cancelled by
     `orchestrator.cancel_closed`, which runs first.
 
-    `issues` is what the poll found, as for `cancel_closed`. A full scan only
-    lists open issues and PRs, so it looks at workflows whose PR is missing
-    from it but whose ticket is there: a merged PR closes its ticket."""
-    rows = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr IS NOT NULL "
-        "AND status IN ('active', 'done') ORDER BY id",
-        (repo, KIND),
-    ).fetchall()
-    if full_scan:
-        open_numbers = {i["number"] for i in issues}
-        closed = [w for w in rows
-                  if w["pr"] not in open_numbers and int(w["subject"]) in open_numbers]
-    else:
-        closed_prs = {i["number"] for i in issues
-                      if "pull_request" in i and i.get("state") == "closed"}
-        closed = [w for w in rows if w["pr"] in closed_prs]
-    for workflow in closed:
-        pull = github.pull(repo, workflow["pr"])
-        if pull["state"] != "closed" or pull.get("merged"):
-            continue
+    `issues` and `full_scan` are as for `base.closed_unmerged`."""
+    for workflow in base.closed_unmerged(conn, github, repo, issues, kind=KIND,
+                                         statuses=(base.ACTIVE, base.DONE), full_scan=full_scan):
         number = int(workflow["subject"])
         if github.get_issue(repo, number)["state"] == "open":
             last = conn.execute(
@@ -190,7 +172,7 @@ def cancel_closed_prs(
                 f"PR #{workflow['pr']} was closed without merging, so the factory stopped "
                 "working on this ticket. Add `agent:implement` to rebuild it.",
                 [last["triggered_by"]] if last else None))
-        base.end(Context(conn, github, cast(Runner, None), settings), workflow, "cancelled", number)
+        base.end(Context(conn, github, settings), workflow, base.CANCELLED, number)
         log.info("%s#%s, the PR of #%s, was closed without merging: workflow cancelled", repo,
                  workflow["pr"], number, extra={"repo": repo, "ticket": workflow["subject"]})
 
@@ -207,10 +189,7 @@ def start_review(
     ticket, review it again in that ticket's workflow (reactivated), against
     the ticket. False, doing nothing, for any other PR."""
     repo, number = enrolment.repo, pr["number"]
-    workflow = conn.execute(
-        "SELECT * FROM workflows WHERE repo = ? AND kind = ? AND pr = ? ORDER BY id DESC LIMIT 1",
-        (repo, KIND, number),
-    ).fetchone()
+    workflow = base.of_pr(conn, repo, KIND, number)
     if workflow is None:
         return False
     head = github.pull(repo, number)["head"]["ref"]
@@ -221,23 +200,39 @@ def start_review(
     if opened is None:
         return False
     if triggered_by is None or triggered_by.id is None:
-        # Review's commits credit whoever asked for it; here no one is known.
-        github.post_comment(repo, number, tickets.render_notice(
-            "The PR's events don't say who added `agent:review`, so nothing was started. "
-            "Add it again."))
+        unknown_reviewer(github, repo, number)
         return True
-    ctx = Context(conn, github, cast(Runner, None), settings)  # queueing never uses the runner
-    base.start(conn, repo=repo, kind=KIND, subject=workflow["subject"])
-    workflow = base.get(conn, workflow["id"])
-    assert workflow is not None
-    if queue_review(ctx, opened, workflow, number, branch=head,
-                     pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
-                     triggered_by=(triggered_by.login, triggered_by.id)) is None:
-        return True
-    for label in base.STALE:
-        github.remove_label(repo, number, label)
-    base.mark_in_progress(github, repo, int(workflow["subject"]))
+    review_again(Context(conn, github, settings), workflow, opened, number, branch=head,
+                 pr_base_sha=json.loads(opened["dispatch"])["base_sha"],
+                 triggered_by=(triggered_by.login, triggered_by.id))
     return True
+
+
+def unknown_reviewer(github: GitHub, repo: str, number: int) -> None:
+    """The notice when no one is known to have added `agent:review`: review's
+    commits credit whoever asked for it."""
+    github.post_comment(repo, number, tickets.render_notice(
+        "The PR's events don't say who added `agent:review`, so nothing was started. "
+        "Add it again."))
+
+
+def review_again(
+    ctx: Context, workflow: sqlite3.Row, after: sqlite3.Row, number: int, *, branch: str,
+    pr_base_sha: str, triggered_by: tuple[str, int],
+) -> None:
+    """A human re-added `agent:review` to PR `number`: the workflow is
+    reactivated and the review queued (`queue_review`), the PR's stale status
+    labels come off and its subject is `agent:in-progress`."""
+    base.start(ctx.conn, repo=workflow["repo"], kind=workflow["kind"],
+               subject=workflow["subject"])
+    workflow = base.get(ctx.conn, workflow["id"])
+    assert workflow is not None
+    if queue_review(ctx, after, workflow, number, branch=branch, pr_base_sha=pr_base_sha,
+                    triggered_by=triggered_by) is None:
+        return
+    for label in base.STALE:
+        ctx.github.remove_label(workflow["repo"], number, label)
+    base.mark_in_progress(ctx.github, workflow["repo"], int(workflow["subject"]))
 
 
 def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
@@ -247,10 +242,10 @@ def on_result(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None:
     up. Otherwise explore's, implement's and review's results are handled,
     including a review whose fixes failed the check (`review.output_used`)."""
     if run["outcome"] == "cancelled":
-        if workflow["status"] == "active":
-            base.end(ctx, workflow, "cancelled", int(run["ticket"]))
+        if workflow["status"] == base.ACTIVE:
+            base.end(ctx, workflow, base.CANCELLED, int(run["ticket"]))
     elif attempts.is_bad(run):
-        if workflow["status"] == "active":
+        if workflow["status"] == base.ACTIVE:
             give_up(ctx, run, workflow)
     elif run["task"] == "explore" and run["outcome"] == "succeeded":
         _explored(ctx, run, workflow, json.loads(run["result"])["output"])
@@ -270,7 +265,7 @@ def reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict
     pr = dispatch["pr_number"]
     discarded = result["outcome"] == "failed"
     if not discarded:
-        store = _store(ctx)
+        store = base.store(ctx)
         checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
         if checked is not None:
             try:
@@ -283,7 +278,7 @@ def reviewed(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, result: dict
     review.finish(ctx.github, repo, pr,
                   needs_a_human=discarded or review.changes_requested(result["output"]),
                   reviewer=run["triggered_by"])
-    base.end(ctx, workflow, "done", ticket)
+    base.end(ctx, workflow, base.DONE, ticket)
     log.info("review run %s posted on %s#%s%s", run["id"], repo, pr,
              " (fixes discarded: they failed the check)" if discarded else "",
              extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
@@ -300,7 +295,7 @@ def _branch_moved(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> None
     assert run is not None
     log.info("review run %s: %s moved while it ran; its fixes were discarded", run["id"],
              json.loads(run["dispatch"])["branch"],
-             extra=about_run(id=run["id"], repo=run["repo"], ticket=run["ticket"]))
+             extra=about_row(run))
     if attempts.retry(ctx.conn, run) is None:
         give_up(ctx, run, workflow)
 
@@ -315,13 +310,9 @@ def prepare(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row) -> dict[str, 
     if run["task"] == "review":
         # Review looks at the PR as it is when the run starts, so a human's
         # push while it waited doesn't make its fixes land on a moved branch.
-        head = _store(ctx).branch_head(run["repo"], dispatch["branch"])
+        head = base.store(ctx).branch_head(run["repo"], dispatch["branch"])
         return {**dispatch, "base_sha": head} if head else None
     return None
-
-
-def _store(ctx: Context) -> bundles.Store:
-    return bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
 
 
 def _test_paths(ctx: Context, repo: str) -> list[str]:
@@ -341,7 +332,7 @@ def queue_review(
     login, user = triggered_by or (after["triggered_by"], after["triggered_by_id"])
     enrolment = enrolments.get(ctx.conn, repo)
     assert enrolment is not None  # an unenrolled repo's runs are never handled
-    head = _store(ctx).branch_head(repo, branch)
+    head = base.store(ctx).branch_head(repo, branch)
     if head is None:
         raise bundles.GitError(f"{branch}, PR #{pr}'s branch, isn't on {repo}")
     pr_issue = ctx.github.get_issue(repo, pr)
@@ -367,7 +358,7 @@ def queue_review(
         )
     except tickets.TooBig as e:
         ctx.github.post_comment(repo, pr, tickets.render_too_big_notice(str(e), login))
-        base.end(ctx, workflow, "stopped", int(ticket), "needs-a-human")
+        base.end(ctx, workflow, base.STOPPED, int(ticket), "needs-a-human")
         log.info("%s#%s is too big to review: %s", repo, pr, e, extra={"repo": repo})
         return None
     run_id = loop.enqueue(ctx.conn, repo=repo, task="review", ticket=ticket, dispatch=dispatch,
@@ -387,12 +378,12 @@ def _implemented(
     if output["verdict"] == "needs-a-human":
         ctx.github.post_comment(repo, number,
                                 render_needs_a_human_comment(run["id"], output["comment"], link))
-        base.end(ctx, workflow, "stopped", number, "needs-a-human")
+        base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
         log.info("implement run %s needs a human on %s#%s", run["id"], repo, number,
                  extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
         return
     dispatch = json.loads(run["dispatch"])
-    store = bundles.Store(ctx.settings.git_dir, ctx.github.git_remote)
+    store = base.store(ctx)
     checked = checked_bundle(ctx, store, run, dispatch["base_sha"])
     assert checked is not None  # built always has commits
     store.push(repo, run["id"], dispatch["branch"])
@@ -425,17 +416,17 @@ def checked_bundle(
 ) -> bundles.Checked | None:
     """The run's bundle as checked on collection, or None for a review that
     made no fixes. If the store lost it (e.g. it was wiped), the run's files
-    are fetched and checked again."""
+    are fetched and checked again; `bundles.Lost` if the runner has none."""
     checked = store.checked(run["repo"], run["id"], base_sha)
     if checked is not None:
         return checked
     files = ctx.runner.files(run["repo"], run["runner_run_id"])
     if files is None:
-        raise bundles.GitError(f"run {run['id']}'s files are gone from the runner")
+        raise bundles.Lost(f"run {run['id']}'s files are gone from the runner")
     if files.bundle is None and run["task"] == "review":
         return None  # review's bundle may be empty: no bundle at all
     if files.bundle is None:
-        raise bundles.GitError(f"run {run['id']}'s bundle is gone from the runner")
+        raise bundles.Lost(f"run {run['id']}'s bundle is gone from the runner")
     dispatch = json.loads(run["dispatch"])
     output = json.loads(run["result"]).get("output") or {}
     return store.check(run["repo"], run["id"], files.bundle, task=run["task"],
@@ -462,12 +453,12 @@ def ticket_changed(
     rest = rendered[len(head):]
     if rest and not rest.startswith("\n## "):
         return True
-    since = _when(run["created_at"])  # when its ticket.md was rendered
+    since = _parse_time(run["created_at"])  # when its ticket.md was rendered
     app = ctx.github.app_login()
-    return any(_when(c.created_at) > since for c in ticket.comments if c.author != app)
+    return any(_parse_time(c.created_at) > since for c in ticket.comments if c.author != app)
 
 
-def _when(iso: str) -> datetime:
+def _parse_time(iso: str) -> datetime:
     return datetime.fromisoformat(iso.replace("Z", "+00:00"))
 
 
@@ -495,12 +486,12 @@ def give_up(
         message, [run["triggered_by"]] if run["triggered_by"] else None))
     if run["task"] == "review":
         ctx.github.add_labels(repo, number, ["agent:blocked"])
-        base.end(ctx, workflow, "stopped", int(run["ticket"]))
+        base.end(ctx, workflow, base.STOPPED, int(run["ticket"]))
     elif not stop:
         ctx.github.add_labels(repo, number, ["agent:blocked"])
         ctx.github.remove_label(repo, number, base.IN_PROGRESS)
     else:
-        base.end(ctx, workflow, "stopped", number, "agent:blocked")
+        base.end(ctx, workflow, base.STOPPED, number, "agent:blocked")
     log.info("gave up on %s#%s after run %s ended %s", repo, number, run["id"], ended,
              extra=about_run(id=run["id"], repo=repo, ticket=run["ticket"]))
 
@@ -516,13 +507,13 @@ def _explored(ctx: Context, run: sqlite3.Row, workflow: sqlite3.Row, output: dic
         why_not = _why_not_implement(ctx, run, issue)
         if why_not is not None:
             post_explore(ctx, run, output, [why_not])
-            base.end(ctx, workflow, "stopped", number, "needs-a-human")
+            base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
             return
         post_explore(ctx, run, output)
         _queue_implement(ctx, run, issue)
     elif verdict == "too-big":
         post_explore(ctx, run, output, ["Add `agent:implement-spec` to build this as a spec."])
-        base.end(ctx, workflow, "stopped", number, "needs-a-human")
+        base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
 
 
 def post_explore(
@@ -550,20 +541,20 @@ def explore_stopped(
     verdict = output["verdict"]
     if verdict in ("needs-a-human", "waiting"):
         post_explore(ctx, run, output, heading=heading)
-        base.end(ctx, workflow, "stopped", number, verdict)
+        base.end(ctx, workflow, base.STOPPED, number, verdict)
     elif verdict == "duplicate":
         duplicate_of = output["duplicate_of"]
         if ctx.github.get_issue(repo, int(duplicate_of))["state"] != "open":
             post_explore(ctx, run, output, [
                 f"#{duplicate_of} has been closed since, so this ticket was left open: only a "
                 "human can tell whether its fix covers this one too."], heading)
-            base.end(ctx, workflow, "stopped", number, "needs-a-human")
+            base.end(ctx, workflow, base.STOPPED, number, "needs-a-human")
             return True
         # The findings first: a reopened duplicate's history is read from the
         # App's explore comment ("### Duplicate of") before the App's close.
         post_explore(ctx, run, output, heading=heading)
         ctx.github.close_as_duplicate(repo, number)
-        base.end(ctx, workflow, "stopped", number)
+        base.end(ctx, workflow, base.STOPPED, number)
     else:
         return False
     return True

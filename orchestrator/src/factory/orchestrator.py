@@ -25,10 +25,10 @@ from factory import enrolment as enrolments
 from factory import state as db_state
 from factory.enrolment import Enrolment
 from factory.github import GitHub, GitHubError
-from factory.logs import about_run
+from factory.logs import about_row
 from factory.runner import Runner
 from factory.tickets import render_notice
-from factory.workflows import implement_spec, implement_ticket, review_pr
+from factory.workflows import implement_spec, implement_ticket
 
 log = logging.getLogger(__name__)
 
@@ -153,12 +153,7 @@ def _start_review(
                             render_notice(FORK_NOTICE, [who.login] if who else None))
         log.info("%s#%s is a fork PR: not reviewed", repo, number, extra={"repo": repo})
         return
-    if implement_spec.start_review(conn, github, settings, issue, enrolment,
-                                   decision.triggered_by):
-        return
-    if not implement_ticket.start_review(conn, github, settings, issue, enrolment,
-                                         decision.triggered_by):
-        review_pr.start(conn, github, settings, issue, enrolment, decision.triggered_by)
+    workflows.start_review(conn, github, settings, issue, enrolment, decision.triggered_by)
 
 
 def _active_on(conn: sqlite3.Connection, repo: str, number: int) -> list[sqlite3.Row]:
@@ -221,12 +216,9 @@ def cancel_closed(
         subjects = [row["ticket"], json.loads(row["dispatch"]).get("pr_number")]
         if any(s is not None and closed(str(s)) for s in subjects):
             log.info("run %s: %s#%s was closed; cancelling", row["id"], repo, row["ticket"],
-                     extra=_about(row))
+                     extra=about_row(row))
             loop.request_cancel(conn, row["id"])
 
-
-def _about(row: sqlite3.Row) -> dict[str, Any]:
-    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
 
 
 # --- polling -------------------------------------------------------------------
@@ -314,10 +306,8 @@ class Poller:
                 )
             if issues is not None:
                 cancel_closed(conn, repo, issues, full_scan=state.cursor is None)
-                implement_ticket.cancel_closed_prs(conn, github, settings, repo, issues,
-                                                   full_scan=state.cursor is None)
-                implement_spec.cancel_closed_prs(conn, github, settings, repo, issues,
-                                                 full_scan=state.cursor is None)
+                workflows.cancel_closed_prs(conn, github, settings, repo, issues,
+                                            full_scan=state.cursor is None)
                 handle_triggers(conn, github, repo, issues, settings)
                 state.cursor, state.etag = now, etag
         except GitHubError as e:
@@ -330,9 +320,8 @@ class Poller:
         state.next_at = now + state.wait
         state.failing_since, state.alerted = None, False
         db_state.record_poll(conn, repo)
-        if any(p["kind"] == "poll_failing" and p["repo"] == repo
-               for p in db_state.open_problems(conn)):
-            db_state.close_problem(conn, "poll_failing", repo=repo)
+        if db_state.has_open_problem(conn, db_state.POLL_FAILING, repo=repo):
+            db_state.close_problem(conn, db_state.POLL_FAILING, repo=repo)
 
     def _failed(
         self,
@@ -364,7 +353,7 @@ class Poller:
             # The problem issue says what kind of error it was, never GitHub's message.
             what = f"HTTP {error.status}" if isinstance(error, GitHubError) else type(error).__name__
             db_state.open_problem(
-                conn, "poll_failing",
+                conn, db_state.POLL_FAILING,
                 f"Polling this repo has failed since {since} ({what}), so new trigger labels "
                 "aren't seen. The factory keeps retrying and closes this when a poll succeeds.",
                 repo=repo)
@@ -411,10 +400,10 @@ def run_once(
     """
     woke = (poller or Poller()).poll_all(conn, github, settings)
     held = enrolments.held(conn)
-    ctx = workflows.Context(conn, github, runner, settings)
+    ctx = workflows.Context(conn, github, settings, runner)
     if woke and poller is not None:
         usage.refresh(conn, settings.limits, datetime.now(UTC), force=True)
-    implement_spec.advance(ctx)
+    workflows.advance(ctx)
     loop.tick(conn, runner, limit=settings.limits.max_in_flight, held=held,
               check=_bundle_check(conn, github, settings),
               prepare=_try_later(lambda row: workflows.prepare(ctx, row)),
@@ -486,7 +475,7 @@ def handle_finished(
     A row is marked handled only after its writes succeed, so a failed post
     is tried again on the next pass.
     """
-    ctx = workflows.Context(conn, github, runner, settings or Settings())
+    ctx = workflows.Context(conn, github, settings or Settings(), runner)
     rows = conn.execute(
         "SELECT * FROM runs WHERE status = 'done' AND handled_at IS NULL ORDER BY id"
     ).fetchall()
@@ -495,7 +484,7 @@ def handle_finished(
             workflows.on_result(ctx, row)
         except (GitHubError, OSError) as e:
             log.error("run %s: writing the result to GitHub failed: %s", row["id"], e,
-                      extra=_about(row))
+                      extra=about_row(row))
             continue
         with conn:
             conn.execute(

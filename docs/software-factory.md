@@ -59,7 +59,7 @@ Each run goes through these steps:
    - If `output.json` fails its task's sub-schema, the runner gives the validation errors back to the agent **once**, in the same session, and asks for a corrected file. If that fails too, the run fails with `failure: invalid_output`.
 5. Steps 5–7 run `if: always()`, whatever happened in step 4. For implement, run the check command after the task (see the automated checks under [Limits and brakes](orchestrator.md#limits-and-brakes)). For review, run it **before and after**: before, so a PR that already fails reaches the agent as something to fix; after, on review's fixes. `result.json` records both. Explore and auto-tickets make no commits, so they run no check.
 6. Assemble `result.json` around `output.json`: run id, outcome, failure reason, and the check result this step recorded itself, out of the agent's reach.
-7. Upload a **git bundle plus `result.json`** as an artifact, together with any screenshots the agent took (`evidence/*.png`). The orchestrator doesn't post the screenshots yet (see [Open questions](#open-questions)), but they can be downloaded from the Actions run that the PR links to. `run.yml` uploads with `retention-days: 7`.
+7. Upload a **git bundle plus `result.json`** as an artifact, together with any screenshots the agent took (`evidence/*.png`). The orchestrator doesn't post the screenshots yet (see [Open questions](#open-questions)), but they can be downloaded from the Actions run that the PR links to. `run.yml` uploads with `retention-days: 7`. The upload is the one step that isn't in the run script: it needs `actions/upload-artifact`, so it's a separate `run.yml` step after the script's, with `if: always()` so it runs whatever the script did.
 
 **Tickets reach the runner as text.** The orchestrator fetches the ticket, renders it to markdown (title, body, and the comments the task should see) and passes that markdown in the dispatch. The task reads it as `ticket.md`, as today's tasks already do. The runner never calls the Issues API, doesn't fall back to fetching the issue itself, and doesn't know which tracker is in use. This is what lets the tracker change later without touching the runner contract. How the orchestrator filters comments and trims a ticket to fit the dispatch is in [Rendering tickets](orchestrator.md#rendering-tickets).
 
@@ -67,7 +67,7 @@ The orchestrator then downloads the artifact, validates it, and does all the wri
 
 **Secrets on the runner.** A runner holds only the Claude token, which is a secret in each enrolled repo (a personal account has no account-wide secrets), and the read-only `GITHUB_TOKEN`. Nothing on the runner can write to GitHub.
 
-- The Claude token is in the env of the **agent step only**, not setup or the check steps.
+- The Claude token reaches the **agent only**, not setup or the check. Actions can't scope a secret to part of a step, so it's in the env of `run.yml`'s one "Run the task" step; the run script deletes it from its own environment before it runs anything, and passes it only to the agent's `docker exec` (by name, in that one command's environment). git, the image build, setup and the check never see it. What remains: `npx` and `tsx`, which start the script, inherit the step's env, and so does the script itself until its first line runs.
 - Checkout uses `persist-credentials: false`, and the agent step doesn't get `GITHUB_TOKEN`, so the agent holds no GitHub credential, not even a read-only one. It doesn't need one: the steps before it put the code, its history, review's base and `ticket.md` on disk, and it works with local git only. The bundle and `result.json` are uploaded by later steps through the Actions artifact channel.
 - Commands the agent runs itself (tests, scripts) inherit the Claude token; that can't be avoided while it holds it. Network egress is an [open question](#open-questions).
 
@@ -135,7 +135,7 @@ Both sides validate against the schemas, and the schemas are the only source of 
 - **Runner side:** a run checks its own `result.json` before uploading it. If the result is invalid, the run fails rather than handing the orchestrator something it can't read.
 - **Orchestrator side:** the orchestrator validates every `result.json` it downloads, plus the checks a schema can't express (e.g. explore's `duplicate_of` must be one of the issues it sent). An invalid result counts as a failed attempt, and nothing is written to GitHub.
 - **Strict:** every object in both schemas has `additionalProperties: false`, so a typo like `verdcit` fails validation instead of being silently dropped.
-- **One version:** `contract_version` is a single integer shared by both schemas. Changing either schema means bumping it and updating both sides in the same commit.
+- **One version:** `contract_version` is a single integer shared by both schemas. Changing either schema means bumping it and updating both sides in the same commit. Before the bump, copy the old `dispatch`, `result` and `enrolment` schemas into `contracts/previous/`: that's how the run script accepts the version before the current one (below).
 - **Fixtures:** `contracts/examples/` holds a valid and an invalid sample of every dispatch and every task's result. The orchestrator's tests and the task side's tests both validate them, so both sides run the same concrete test.
 - `run.yml` and the orchestrator deploy separately, so they can be out of step. Callers use `run.yml@main`, so a merged schema change reaches `run.yml` at once, while the orchestrator changes only when it's redeployed. So `run.yml` accepts the current version **and the one before it**, and writes its result in the version it was sent, and the rule is: merge, then redeploy the orchestrator. If `run.yml` gets any other version (an orchestrator ahead of `run.yml`, or two versions behind), it fails before the agent starts, with `failure: contract_mismatch`. That costs seconds rather than Claude usage, and doesn't count as an attempt, because it isn't the ticket's fault. A `result.json` with an unknown version is `invalid`.
 - If Claude rejects the token (expired, revoked, or the secret is missing), `run.yml` fails the run with `failure: claude_auth`. It isn't an attempt either.
@@ -143,7 +143,7 @@ Both sides validate against the schemas, and the schemas are the only source of 
 
 How the orchestrator responds to `contract_mismatch`, `claude_auth` and `usage_limit` is in [Failures that aren't attempts](orchestrator.md#dispatching-and-collecting).
 
-Language types (zod on the task side, Python models on the orchestrator side) are generated from the schemas or tested against them. They are never written independently.
+Language types are generated from the schemas or tested against them, never written independently. On the orchestrator side they're pydantic models, tested against the schemas' examples. On the task side they're TypeScript types in `runner/contract-types.ts`, whose keys, required keys and literal values are tied to constants by the compiler, and those constants to the schemas by a test.
 
 ## Tasks
 
@@ -212,7 +212,7 @@ Review reads a PR's diff, the repo's coding standards and the originating ticket
 
 It uses the `code-review` skill, which runs two reviewers as **sub-agents inside the one run**, each with a fresh context: **Standards** (the repo's documented standards, plus the skill's baseline list of code smells) and **Spec** (what's missing, what wasn't asked for, and what looks implemented but wrong). The main agent combines their reports and makes the fixes in one pass. They aren't separate tasks: two runs would fix the same branch at the same time and count twice against attempts and the daily cap.
 
-**Instructions come from the base.** The PR head is checked out, so a PR that edits `CLAUDE.md`, `AGENTS.md` or `.claude/` would change the instructions its own review runs under. Before the agent starts, `run.yml` restores those paths from the PR's base, and a PR that changes them gets a line in the verdict: "this PR changes agent instructions; it was reviewed against the base's".
+**Instructions come from the base.** The PR head is checked out, so a PR that edits `CLAUDE.md`, `AGENTS.md` or `.claude/` would change the instructions its own review runs under. Before the agent starts, the run script restores those paths from the PR's base (and hides the restored files from git, so the agent can't commit them over the PR's), `result.json` says so with `instructions_changed: true`, and the verdict gets a line: "this PR changes agent instructions; it was reviewed against the base's".
 
 **Output:**
 

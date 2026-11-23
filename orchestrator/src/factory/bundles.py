@@ -47,6 +47,11 @@ class Moved(GitError):
     """The branch has commits the push doesn't have: it was refused, not forced."""
 
 
+class Lost(Exception):
+    """A run's commits are gone for good: not in the store, and the runner no
+    longer has its files. Not an OSError: trying again won't bring them back."""
+
+
 class Conflict(Exception):
     """A run's commits don't merge cleanly onto the branch they should land on."""
 

@@ -5,7 +5,7 @@
 // build:image`); run them with `npm run test:runner`.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,10 +16,13 @@ export const baseImage = process.env.FACTORY_BASE_IMAGE ?? "factory-base:test";
 export const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
-export type Files = Record<string, string>;
+// Path -> content; null deletes the file.
+export type Files = Record<string, string | null>;
 
 // A bare repo standing in for the target on GitHub. Each call to commit()
-// adds a commit with the given files and returns its sha.
+// adds a commit with the given files on the current branch (main at first)
+// and returns its sha; onBranch() switches to a new branch from the current
+// commit, e.g. a PR's.
 export const makeTarget = () => {
   const dir = mkdtempSync(join(tmpdir(), "factory-target-"));
   const bare = join(dir, "target.git");
@@ -31,18 +34,27 @@ export const makeTarget = () => {
   git(work, "config", "user.name", "test");
   const commit = (files: Files): string => {
     for (const [path, content] of Object.entries(files)) {
+      if (content === null) {
+        rmSync(join(work, path));
+        continue;
+      }
       mkdirSync(dirname(join(work, path)), { recursive: true });
       writeFileSync(join(work, path), content);
     }
     git(work, "add", "-A");
     git(work, "commit", "-q", "-m", "change");
-    git(work, "push", "-q", "origin", "HEAD:main");
+    git(work, "push", "-q", "origin", "HEAD");
     return git(work, "rev-parse", "HEAD");
   };
-  return { url: bare, commit };
+  const onBranch = (name: string) => git(work, "checkout", "-q", "-b", name);
+  return { url: bare, commit, onBranch };
 };
 
 export type Run = { status: number; output: string; out: string; result?: any };
+
+// Image names unique to this test process, so test files running at once
+// don't build over each other's `factory-run-<run_id>`.
+const IMAGE_PREFIX = `factory-test-${process.pid}`;
 
 export const runTask = (dispatch: unknown, targetUrl: string, env: NodeJS.ProcessEnv = {}): Run => {
   const dir = mkdtempSync(join(tmpdir(), "factory-run-"));
@@ -53,8 +65,10 @@ export const runTask = (dispatch: unknown, targetUrl: string, env: NodeJS.Proces
   const proc = spawnSync("npx", ["tsx", join(root, "runner/run-task.ts"), dispatchPath, out, work], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, FACTORY_TARGET_URL: targetUrl, ...env },
+    env: { ...process.env, FACTORY_TARGET_URL: targetUrl, FACTORY_IMAGE_PREFIX: IMAGE_PREFIX, ...env },
   });
+  const runId = (dispatch as { run_id?: unknown })?.run_id;
+  if (typeof runId === "number") spawnSync("docker", ["rmi", "-f", `${IMAGE_PREFIX}-${runId}`]);
   const resultPath = join(out, "result.json");
   return {
     status: proc.status ?? -1,
@@ -68,8 +82,9 @@ export const runTask = (dispatch: unknown, targetUrl: string, env: NodeJS.Proces
 // write output.json.
 export const FACTORY = "/home/agent/factory";
 
-// An enrolment whose image has a fake `claude`: a bash script that gets the
-// prompt on stdin and runs in the workspace.
+// An enrolment whose image has a fake `claude` (copied over the real one, so
+// no Claude usage is spent): a bash script that gets the prompt on stdin and
+// runs in the workspace.
 export const fakeClaude = (script: string, config = "setup: \"true\"\ncheck: echo checked\n"): Files => ({
   ".factory/Dockerfile": `FROM ${baseImage}\nCOPY --chmod=755 fake-claude /usr/local/bin/claude\n`,
   ".factory/config.yml": config,
@@ -83,9 +98,10 @@ export const success = event({ type: "result", subtype: "success", is_error: fal
 export const writeOutput = (output: unknown) =>
   `cat > ${FACTORY}/output.json <<'JSON'\n${typeof output === "string" ? output : JSON.stringify(output)}\nJSON`;
 
-// What run.yml gives the script: the Claude token and the App's bot identity.
-export const claudeEnv = {
-  CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token",
+// What run.yml gives the script: the App's bot identity, and with it the
+// Claude token.
+export const bot = {
   FACTORY_BOT_NAME: "swfactory[bot]",
   FACTORY_BOT_EMAIL: "1234+swfactory[bot]@users.noreply.github.com",
 };
+export const claudeEnv = { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token", ...bot };

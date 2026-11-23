@@ -194,6 +194,28 @@ def test_the_verdict_says_when_the_pr_changes_agent_instructions(
 # --- the branch moved while review ran ------------------------------------------------------
 
 
+def test_a_review_whose_fixes_are_lost_everywhere_says_so_once_on_the_pr(
+    conn, github, fake, repo, remote, runner, settings
+):
+    issue, pr, row = review_dispatched(conn, github, repo, remote, runner, settings)
+    runner.finish(row["runner_run_id"], RunFiles(json.dumps(review_result(row)).encode(),
+                                                 fixes(remote, row)))
+    loop.collect(conn, runner)  # collected, then the runner's files expire before handling
+    runner.forget(row["runner_run_id"])
+    before = len(issue.posts)
+
+    for _ in range(2):
+        orchestrator.run_once(conn, github, runner, settings)
+
+    pr_issue = repo.issues[pr["number"]]
+    [notice] = [c for c in pr_issue.posts if "lost" in c["body"]]
+    assert "agent:review" in notice["body"]
+    assert "needs-a-human" in pr_issue.labels
+    assert len(issue.posts) == before and "needs-a-human" not in issue.labels
+    assert "agent:in-progress" not in issue.labels
+    assert [w["status"] for w in conn.execute("SELECT * FROM workflows")] == ["stopped"]
+
+
 def human_pushes(remote, branch):
     """Someone pushes a commit to the PR's branch. Returns the new head."""
     remote.branch(branch, remote.remote_branch(branch))

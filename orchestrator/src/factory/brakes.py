@@ -83,7 +83,7 @@ def parse_time(value: object) -> datetime | None:
     return None
 
 
-def _about(when: datetime | None, now: datetime) -> str:
+def _clock_time(when: datetime | None, now: datetime) -> str:
     if when is None:
         return "unknown"
     local = when.astimezone()
@@ -144,7 +144,7 @@ def usage_hold(reading: state.UsageReading | None, limits: Limits, now: datetime
         last = max(range(len(over)), key=lambda i: resets[i] or datetime.max.replace(tzinfo=UTC))
         row = over[last]
         return (f"Claude {kind_name(row)} usage at {row['percent']:g}%, "
-                f"resumes about {_about(resets[last], now)}")
+                f"resumes about {_clock_time(resets[last], now)}")
     return None
 
 
@@ -159,7 +159,7 @@ def global_hold(
         return CONTRACT_MISMATCH
     refused = loop.refused_until(conn, now)
     if refused is not None:
-        return f"{REFUSED}, next try about {_about(refused, now)}"
+        return f"{REFUSED}, next try about {_clock_time(refused, now)}"
     if daily_count(conn, now) >= limits.daily_cap:
         return DAILY_CAP
     return usage_hold(state.latest_usage(conn), limits, now) if usage else None

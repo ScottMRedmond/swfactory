@@ -123,12 +123,11 @@ def _record(conn, old, repo, state, sha, config, error) -> None:
         )
     if state == "invalid":
         db_state.open_problem(
-            conn, "invalid_enrolment",
+            conn, db_state.INVALID_ENROLMENT,
             f"`{CONFIG_PATH}` fails `contracts/enrolment.schema.json`, so this repo "
             f"isn't polled: {error}", repo=repo)
-    elif any(p["kind"] == "invalid_enrolment" and p["repo"] == repo
-             for p in db_state.open_problems(conn)):
-        db_state.close_problem(conn, "invalid_enrolment", repo=repo)
+    elif db_state.has_open_problem(conn, db_state.INVALID_ENROLMENT, repo=repo):
+        db_state.close_problem(conn, db_state.INVALID_ENROLMENT, repo=repo)
     if state == old_state:
         return
     if state == "enrolled":

@@ -5,27 +5,19 @@
 // fetched too and named PR_BASE_REF, so the diff is on disk: the agent has
 // no credential to fetch anything itself.
 
-import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { AGENT_DIR } from "../../agent";
+import type { Check, Dispatch } from "../../contract-types";
+import { mustRun, run } from "../../spawn";
 
 export const PR_BASE_REF = "refs/factory/pr-base";
 export const BRIEF = `${AGENT_DIR}/review.md`;
 
-type Check = { passed: boolean; output_tail: string };
+const git = (cwd: string, args: string[]) => run("git", ["-C", cwd, ...args]);
 
-const git = (cwd: string, args: string[], input?: string | Buffer) => {
-  const proc = spawnSync("git", ["-C", cwd, ...args], { input, maxBuffer: 256 * 1024 * 1024 });
-  if (proc.error) throw proc.error;
-  return { status: proc.status ?? 1, stdout: proc.stdout, stderr: String(proc.stderr ?? "") };
-};
-
-const mustGit = (cwd: string, args: string[], input?: string | Buffer) => {
-  const result = git(cwd, args, input);
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
-  return result.stdout;
-};
+// Its stdout as bytes: `git show` of a file needn't be text.
+const mustGit = (cwd: string, args: string[]) => mustRun("git", ["-C", cwd, ...args]).bytes;
 
 // The files that tell an agent how to work, wherever they are in the repo.
 const INSTRUCTIONS = [":(glob)**/CLAUDE.md", ":(glob)**/AGENTS.md", ":(glob)**/.claude/**"];
@@ -71,7 +63,7 @@ export const prepareCheckout = (target: string, prBaseSha: string): boolean => {
 
 // What the agent is told about this review, next to the ticket.
 export const brief = (
-  dispatch: { pr_number?: number; pr_base_sha?: string; branch?: string; findings_only?: boolean },
+  dispatch: Pick<Dispatch, "pr_number" | "pr_base_sha" | "branch" | "findings_only">,
   enrolment: { check: string; test_paths?: string[] },
   checkBefore: Check,
 ): string => {
@@ -102,11 +94,7 @@ export const brief = (
 // After the agent: throw away whatever it left uncommitted, so the check
 // runs on its commits only, which are all that gets pushed.
 export const cleanWorkspace = (container: string, workspace: string) => {
-  const proc = spawnSync(
-    "docker",
-    ["exec", "-w", workspace, container, "sh", "-c", "git reset -q --hard && git clean -qfd"],
-    { encoding: "utf8" },
-  );
+  const ran = run("docker", ["exec", "-w", workspace, container, "sh", "-c", "git reset -q --hard && git clean -qfd"]);
   // The check still runs, and says what it found, if this fails.
-  if (proc.status !== 0) console.log(`[factory] can't clean the workspace: ${proc.stdout}${proc.stderr}`);
+  if (ran.status !== 0) console.log(`[factory] can't clean the workspace: ${ran.output}`);
 };

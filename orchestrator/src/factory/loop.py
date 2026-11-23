@@ -15,7 +15,7 @@ from typing import Any
 from factory import state as db_state
 from factory import tokenscan
 from factory.contract import ContractError, Task, parse_result
-from factory.logs import about_run
+from factory.logs import about_row
 from factory.runner import Runner, RunFiles, RunnerUnavailable, RunRefused, RunState
 
 log = logging.getLogger(__name__)
@@ -48,9 +48,6 @@ Check = Callable[[sqlite3.Row, dict[str, Any], RunFiles], None]
 Prepare = Callable[[sqlite3.Row], dict[str, Any] | None]
 
 
-def _about(row: sqlite3.Row) -> dict[str, Any]:
-    return about_run(id=row["id"], repo=row["repo"], ticket=row["ticket"])
-
 
 # How long past its task's timeout a still-running run is left before it's
 # cancelled, for queueing and upload (orchestrator.md, "Dispatching and collecting").
@@ -58,6 +55,9 @@ TIMEOUT_GRACE = timedelta(minutes=15)
 # After the runner refuses a run (on Actions: the spending limit), dispatching
 # waits this long, so the refused row isn't dispatched again every tick.
 REFUSED_BACKOFF = timedelta(minutes=15)
+# A row claimed for dispatching this long ago that never got a runner run id
+# was left by a process that died mid-dispatch.
+CLAIM_STALE = timedelta(minutes=10)
 # A runner unavailable this long is a factory problem.
 UNAVAILABLE_PROBLEM_AFTER = timedelta(minutes=30)
 
@@ -149,17 +149,18 @@ def cancel_requested(
     human closing its issue or PR."""
     rows = conn.execute(
         """SELECT * FROM runs WHERE cancel_requested_at IS NOT NULL
+           AND (status = 'queued' OR runner_run_id IS NOT NULL)
            AND status IN ('queued', 'dispatched') ORDER BY id"""
     ).fetchall()
     for row in rows:
-        log.info("run %s: cancelling, as asked", row["id"], extra=_about(row))
+        log.info("run %s: cancelling, as asked", row["id"], extra=about_row(row))
         try:
             cancel(conn, runner, row)
         except RunnerUnavailable as e:
             # The request stays; the next tick tries again.
             _unavailable(conn, now)
             log.warning("runner unavailable while cancelling run %s: %s", row["id"], e,
-                        extra=_about(row))
+                        extra=about_row(row))
 
 
 def collect(
@@ -176,8 +177,10 @@ def collect(
     `check` judges a succeeded result further (see `Check`).
     """
     now = now or datetime.now(UTC)
+    _release_stale_claims(conn, now)
     rows = conn.execute(
-        "SELECT * FROM runs WHERE status = 'dispatched' AND (? IS NULL OR id = ?) ORDER BY id",
+        """SELECT * FROM runs WHERE status = 'dispatched' AND runner_run_id IS NOT NULL
+           AND (? IS NULL OR id = ?) ORDER BY id""",
         (only, only),
     ).fetchall()
     for row in rows:
@@ -185,11 +188,11 @@ def collect(
             _collect_one(conn, runner, row, now, check)
         except TryLater as e:
             log.warning("run %s can't be judged yet, trying again next tick: %s", row["id"], e,
-                        extra=_about(row))
+                        extra=about_row(row))
         except RunRefused as e:
             # The run will never happen; not the ticket's fault, so not an attempt.
             # Dispatching backs off for a while, so it isn't refused every tick.
-            log.warning("run %s goes back to the queue: %s", row["id"], e, extra=_about(row))
+            log.warning("run %s goes back to the queue: %s", row["id"], e, extra=about_row(row))
             _unavailable(conn, now)
             db_state.set_runner_refused_at(conn, _iso(now))
             with conn:
@@ -203,7 +206,21 @@ def collect(
             # The row stays dispatched until the runner answers.
             _unavailable(conn, now)
             log.warning("runner unavailable while collecting run %s: %s", row["id"], e,
-                        extra=_about(row))
+                        extra=about_row(row))
+
+
+def _release_stale_claims(conn: sqlite3.Connection, now: datetime) -> None:
+    """A row claimed for dispatching (`dispatch_run`) whose process died before
+    the runner answered goes back to the queue."""
+    rows = conn.execute(
+        """SELECT * FROM runs WHERE status = 'dispatched' AND runner_run_id IS NULL
+           AND dispatched_at < ?""",
+        (_iso(now - CLAIM_STALE),),
+    ).fetchall()
+    for row in rows:
+        log.warning("run %s was claimed for dispatching but never dispatched; queueing it again",
+                    row["id"], extra=about_row(row))
+        _release(conn, row["id"])
 
 
 def _collect_one(
@@ -214,14 +231,14 @@ def _collect_one(
     if state is RunState.RUNNING:
         if _overdue(row, now):
             log.warning("run %s is still running past its timeout; cancelling it", row["id"],
-                        extra=_about(row))
+                        extra=about_row(row))
             cancel(conn, runner, row, outcome="timed_out")
         return
     if state is RunState.MISSING:
-        log.warning("run %s is missing on the runner", row["id"], extra=_about(row))
+        log.warning("run %s is missing on the runner", row["id"], extra=about_row(row))
         _finish(conn, row["id"], "failed", None)
     elif state is RunState.TIMED_OUT:
-        log.warning("run %s hit its timeout on the runner", row["id"], extra=_about(row))
+        log.warning("run %s hit its timeout on the runner", row["id"], extra=about_row(row))
         _finish(conn, row["id"], "timed_out", None)
     else:
         files = runner.files(row["repo"], row["runner_run_id"])
@@ -261,12 +278,12 @@ def _judge(
     """The outcome of a finished run, the result.json to keep (as JSON text),
     and, for an invalid one, why."""
     if files is None or files.result_json is None:
-        log.warning("run %s finished without a result.json", row["id"], extra=_about(row))
+        log.warning("run %s finished without a result.json", row["id"], extra=about_row(row))
         return "failed", None, None
     try:
         data = json.loads(files.result_json)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        log.warning("run %s: result.json isn't JSON: %s", row["id"], e, extra=_about(row))
+        log.warning("run %s: result.json isn't JSON: %s", row["id"], e, extra=about_row(row))
         return "invalid", None, f"result.json isn't JSON: {e}"
     kept = json.dumps(data)
     try:
@@ -282,7 +299,7 @@ def _judge(
         if check is not None and result.outcome == "succeeded":
             check(row, data, files)
     except ContractError as e:
-        log.warning("run %s: invalid result.json: %s", row["id"], e, extra=_about(row))
+        log.warning("run %s: invalid result.json: %s", row["id"], e, extra=about_row(row))
         return "invalid", kept, str(e)
     return result.outcome, kept, None
 
@@ -368,12 +385,12 @@ def dispatch(
                 max_new -= 1
         except TryLater as e:
             log.warning("run %s can't be prepared, stays queued: %s", row["id"], e,
-                        extra=_about(row))
+                        extra=about_row(row))
             return
         except RunnerUnavailable as e:
             # The row stays queued; try again next tick.
             log.warning("runner unavailable, run %s stays queued: %s", row["id"], e,
-                        extra=_about(row))
+                        extra=about_row(row))
             _unavailable(conn, now)
             return
         if refused_at is None:
@@ -384,24 +401,47 @@ def dispatch(
 
 def dispatch_run(
     conn: sqlite3.Connection, runner: Runner, row: sqlite3.Row, prepare: Prepare | None = None
-) -> None:
-    """Dispatch one queued row, whatever the limits. Raises `RunnerUnavailable`
-    or `TryLater` (the row stays queued then)."""
+) -> bool:
+    """Dispatch one queued row, whatever the limits. False if another process
+    (`factory serve` and `factory doctor` share the database) claimed it first,
+    so it isn't sent twice. Raises `RunnerUnavailable` or `TryLater` (the row
+    stays queued then)."""
     sent = json.loads(row["dispatch"])
     if prepare is not None and (fresh := prepare(row)) is not None:
         sent = fresh
-        # Stored first: the row keeps what the run was actually sent.
-        with conn:
-            conn.execute("UPDATE runs SET dispatch = ? WHERE id = ? AND status = 'queued'",
-                         (json.dumps(sent), row["id"]))
-    runner_run_id = runner.dispatch(row["repo"], sent)
+    # Claimed before the runner is asked: `dispatched` with no runner_run_id
+    # yet. The row keeps what the run was actually sent.
+    with conn:
+        claimed = conn.execute(
+            """UPDATE runs SET status = 'dispatched', dispatch = ?, dispatched_at = ?
+               WHERE id = ? AND status = 'queued'""",
+            (json.dumps(sent), _now(), row["id"]),
+        ).rowcount
+    if not claimed:
+        log.info("run %s was dispatched by someone else", row["id"], extra=about_row(row))
+        return False
+    try:
+        runner_run_id = runner.dispatch(row["repo"], sent)
+    except BaseException:
+        _release(conn, row["id"])
+        raise
     log_url = runner.log_link(row["repo"], runner_run_id)
     with conn:
         conn.execute(
-            """UPDATE runs SET status = 'dispatched', runner_run_id = ?, log_url = ?,
-                               dispatched_at = ?
+            """UPDATE runs SET runner_run_id = ?, log_url = ?, dispatched_at = ?
                WHERE id = ?""",
             (runner_run_id, log_url, _now(), row["id"]),
+        )
+    return True
+
+
+def _release(conn: sqlite3.Connection, run_id: int) -> None:
+    """Put a claimed row that never reached the runner back in the queue."""
+    with conn:
+        conn.execute(
+            """UPDATE runs SET status = 'queued', dispatched_at = NULL
+               WHERE id = ? AND status = 'dispatched' AND runner_run_id IS NULL""",
+            (run_id,),
         )
 
 
@@ -418,8 +458,8 @@ def _available(conn: sqlite3.Connection) -> None:
     if db_state.runner_unavailable_since(conn) is not None:
         log.info("the runner answers again")
         db_state.set_runner_unavailable_since(conn, None)
-    if any(p["kind"] == "runner_unavailable" for p in db_state.open_problems(conn)):
-        db_state.close_problem(conn, "runner_unavailable")
+    if db_state.has_open_problem(conn, db_state.RUNNER_UNAVAILABLE):
+        db_state.close_problem(conn, db_state.RUNNER_UNAVAILABLE)
 
 
 def _check_unavailable(conn: sqlite3.Connection, now: datetime) -> None:
@@ -427,8 +467,8 @@ def _check_unavailable(conn: sqlite3.Connection, now: datetime) -> None:
     since = db_state.runner_unavailable_since(conn)
     if since is None or now - datetime.fromisoformat(since) < UNAVAILABLE_PROBLEM_AFTER:
         return
-    if not any(p["kind"] == "runner_unavailable" for p in db_state.open_problems(conn)):
+    if not db_state.has_open_problem(conn, db_state.RUNNER_UNAVAILABLE):
         log.error("the runner has been unavailable since %s", since)
-        db_state.open_problem(conn, "runner_unavailable",
+        db_state.open_problem(conn, db_state.RUNNER_UNAVAILABLE,
                            f"The runner has been unavailable (or refusing runs) since {since}, "
                            "so nothing is dispatched or collected.")

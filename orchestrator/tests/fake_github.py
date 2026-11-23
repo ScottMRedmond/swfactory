@@ -197,7 +197,8 @@ class FakeGitHub:
                 if auth == "jwt":
                     error = self._check_jwt(request)
                 elif auth == "installation":
-                    error, args = self._check_installation_token(request)
+                    error, token = self._check_installation_token(request)
+                    args = token + args
                 else:
                     error = self._check_token(request, f"{args[0]}/{args[1]}")
                 if error:
@@ -239,6 +240,7 @@ class FakeGitHub:
             ("GET", repo + r"/pulls/(\d+)/reviews", self._list_reviews, "token"),
             ("POST", repo + r"/pulls/(\d+)/reviews", self._create_review, "token"),
             ("POST", r"/graphql", self._graphql, "installation"),
+            ("GET", r"/users/([^/]+)", self._user, "installation"),
         ]
 
     def _check_jwt(self, request: Request) -> Response | None:
@@ -573,6 +575,10 @@ class FakeGitHub:
         pr["requested_reviewers"] += [l for l in body["reviewers"]
                                       if l not in pr["requested_reviewers"]]
         return _json(201, {"number": pr["number"]})
+
+    def _user(self, token, login, *, query, body):
+        return _json(200, {"login": login, "id": user_id(login),
+                           "type": "Bot" if login.endswith("[bot]") else "User"})
 
     def _graphql(self, token, *, query, body):
         """The GraphQL operations the orchestrator sends, picked by operation name.

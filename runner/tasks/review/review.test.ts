@@ -3,62 +3,19 @@
 // `claude` in the enrolment's image, and what the run leaves in its output
 // folder. Needs git and Docker (`npm run test:runner`).
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  FACTORY, claudeEnv, fakeClaude as fakeAgent, git, makeTarget, runTask as runScript, success, type Files, type Run,
+} from "../../testing";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "../../..");
-const baseImage = process.env.FACTORY_BASE_IMAGE ?? "factory-base:test";
-const FACTORY = "/home/agent/factory";
 const BRANCH = "feature/accents";
 
-const git = (cwd: string, ...args: string[]): string =>
-  execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-
-type Files = Record<string, string | null>;
-
-// A bare repo standing in for the target on GitHub. commit() adds a commit
-// on the current branch (null deletes a file); onBranch() switches to a PR
-// branch made from main's head.
-const makeTarget = () => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-target-"));
-  const bare = join(dir, "target.git");
-  const work = join(dir, "work");
-  git(dir, "init", "-q", "--bare", "-b", "main", bare);
-  git(dir, "init", "-q", "-b", "main", work);
-  git(work, "remote", "add", "origin", bare);
-  git(work, "config", "user.email", "test@example.com");
-  git(work, "config", "user.name", "test");
-  const commit = (files: Files): string => {
-    for (const [path, content] of Object.entries(files)) {
-      if (content === null) {
-        rmSync(join(work, path));
-        continue;
-      }
-      mkdirSync(dirname(join(work, path)), { recursive: true });
-      writeFileSync(join(work, path), content);
-    }
-    git(work, "add", "-A");
-    git(work, "commit", "-q", "-m", "change");
-    git(work, "push", "-q", "origin", "HEAD");
-    return git(work, "rev-parse", "HEAD");
-  };
-  const onBranch = (name: string) => git(work, "checkout", "-q", "-b", name);
-  return { url: bare, commit, onBranch };
-};
-
-// The fake `claude` (see run-task.test.ts): a bash script in the enrolment.
-const fakeClaude = (script: string, check = "echo checked"): Files => ({
-  ".factory/Dockerfile": `FROM ${baseImage}\nCOPY --chmod=755 fake-claude /usr/local/bin/claude\n`,
-  ".factory/config.yml": `setup: "true"\ncheck: ${JSON.stringify(check)}\n`,
-  ".factory/fake-claude": `#!/bin/bash\nset -u\n${script}\n`,
-});
-
-const event = (data: object) => `echo '${JSON.stringify({ session_id: "s-1", ...data })}'`;
-const success = event({ type: "result", subtype: "success", is_error: false, result: "done" });
+// The fake `claude` (testing.ts), with the enrolment's check command.
+const fakeClaude = (script: string, check = "echo checked"): Files =>
+  fakeAgent(script, `setup: "true"\ncheck: ${JSON.stringify(check)}\n`);
 
 const reviewOutput = {
   standards: { verdict: "pass", reasoning: "Fine." },
@@ -102,32 +59,7 @@ const reviewDispatch = (pr: { prBase: string; head: string }, extra: object = {}
   ...extra,
 });
 
-const env = {
-  CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-test-token",
-  FACTORY_BOT_NAME: "swfactory[bot]",
-  FACTORY_BOT_EMAIL: "1234+swfactory[bot]@users.noreply.github.com",
-};
-
-type Run = { status: number; output: string; out: string; result?: any };
-
-const runTask = (dispatch: object, targetUrl: string): Run => {
-  const dir = mkdtempSync(join(tmpdir(), "factory-run-"));
-  const dispatchPath = join(dir, "dispatch.json");
-  writeFileSync(dispatchPath, JSON.stringify(dispatch));
-  const out = join(dir, "out");
-  const proc = spawnSync("npx", ["tsx", join(root, "runner/run-task.ts"), dispatchPath, out, join(dir, "work")], {
-    cwd: root,
-    encoding: "utf8",
-    env: { ...process.env, FACTORY_TARGET_URL: targetUrl, ...env },
-  });
-  const resultPath = join(out, "result.json");
-  return {
-    status: proc.status ?? -1,
-    output: proc.stdout + proc.stderr,
-    out,
-    result: existsSync(resultPath) ? JSON.parse(readFileSync(resultPath, "utf8")) : undefined,
-  };
-};
+const runTask = (dispatch: object, targetUrl: string): Run => runScript(dispatch, targetUrl, claudeEnv);
 
 // The files each commit in the run's bundle touches, oldest first.
 const bundled = (target: { url: string }, run: Run): string[][] => {

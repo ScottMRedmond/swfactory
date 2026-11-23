@@ -2,12 +2,7 @@
 // how the last attempt ended, so the agent starts from what broke. See
 // Attempts under "Limits and brakes" in docs/orchestrator.md.
 
-export type PreviousAttempt = {
-  outcome: "failed" | "invalid";
-  failure?: string;
-  check_output?: string;
-  validation_error?: string;
-};
+import type { PreviousAttempt } from "./contract-types";
 
 // A code block that the text can't close early, whatever backticks it holds.
 const block = (text: string): string => {

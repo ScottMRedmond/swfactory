@@ -8,7 +8,7 @@ runs go through the fake runner."""
 import json
 from dataclasses import replace
 
-from fake_github import user_id
+from fake_github import APP_LOGIN, user_id
 from git_repos import git
 
 from factory import loop, orchestrator
@@ -151,6 +151,29 @@ def test_landing_again_after_a_crash_changes_nothing(conn, github, repo, remote,
     assert len(first.posts) == 1 and "agent:built" in first.labels
 
 
+def test_a_spec_ticket_whose_commits_are_lost_everywhere_needs_a_human_once(
+    conn, github, repo, remote, runner, settings
+):
+    _, [first] = built_spec(conn, github, repo, runner, settings, ticket("Store saved searches"))
+    orchestrator.run_once(conn, github, runner, settings)
+    [implement] = implements(conn)
+    head = remote.remote_branch(BRANCH)
+    runner.finish(implement["runner_run_id"], RunFiles(
+        json.dumps(implement_result(implement)).encode(),
+        commits(remote, implement, {"src/saved.py": "store()\n"})))
+    loop.collect(conn, runner)  # collected, then the runner's files expire before handling
+    runner.forget(implement["runner_run_id"])
+
+    for _ in range(2):
+        orchestrator.run_once(conn, github, runner, settings)
+
+    assert remote.remote_branch(BRANCH) == head
+    [notice] = first.posts
+    assert "lost" in notice["body"] and "agent:implement" in notice["body"]
+    assert "needs-a-human" in first.labels and "agent:in-progress" not in first.labels
+    assert implements(conn, "queued") == []
+
+
 def test_a_ticket_edited_while_it_was_built_says_so_when_it_lands(
     conn, github, repo, remote, runner, settings
 ):
@@ -199,6 +222,9 @@ def test_a_clean_merge_after_a_human_pushed_lands_as_a_merge_commit(
     assert git(remote.path, "show", f"{head}:src/saved.py") == "store()"
     assert git(remote.path, "show", f"{head}:docs/notes.md") == "a human's notes"
     assert "agent:built" in first.labels
+    bot = f"{user_id(APP_LOGIN)}+{APP_LOGIN}@users.noreply.github.com"
+    assert git(remote.path, "log", "-1", "--format=%an <%ae>|%cn <%ce>", head) == (
+        f"{APP_LOGIN} <{bot}>|{APP_LOGIN} <{bot}>")
 
 
 def test_a_conflict_discards_the_commits_and_builds_the_ticket_again_on_the_new_head(
