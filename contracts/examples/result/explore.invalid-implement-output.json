@@ -1,0 +1,10 @@
+{
+  "contract_version": 1,
+  "run_id": 412,
+  "task": "explore",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "built",
+    "pr_body": "Folds accents when searching."
+  }
+}

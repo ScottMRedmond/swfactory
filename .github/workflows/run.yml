@@ -1,0 +1,89 @@
+# The factory's reusable workflow. An enrolled repo's caller workflow
+# (runner/templates/factory.yml) calls it, so each run happens in the target
+# repo, with that repo's read-only GITHUB_TOKEN. See "Runners" in
+# docs/software-factory.md.
+#
+# It only prepares the job and calls one script, runner/run-task.ts, with the
+# dispatch. The script runs every step, including those that run whatever
+# happened, and leaves result.json (plus any bundle and screenshots) in one
+# folder, which the last step uploads as the `factory-run` artifact.
+#
+# A reusable workflow's run-name is ignored; the caller's run-name carries
+# the factory run id.
+name: Factory run
+
+on:
+  workflow_call:
+    inputs:
+      dispatch:
+        description: The dispatch, one JSON object (contracts/dispatch.schema.json)
+        type: string
+        required: true
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # The smaller of the dispatch's timeout and 60 (Actions has no min()), so
+    # a hand-made dispatch can't hold a runner for hours.
+    timeout-minutes: ${{ fromJSON(inputs.dispatch).timeout_minutes > 60 && 60 || fromJSON(inputs.dispatch).timeout_minutes }}
+    steps:
+      # The factory's own code, which holds the run script and contracts/,
+      # at the commit this run.yml came from (job.workflow_*), so a caller
+      # pinned to a branch gets that branch's script. Falls back to main.
+      # The factory repo is public, so the target's token can read it.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository || 'ScottMRedmond/swfactory' }}
+          ref: ${{ job.workflow_sha || 'main' }}
+          path: .factory-runner
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .factory-runner/package-lock.json
+
+      - run: npm ci --prefix .factory-runner
+
+      # Docker's GitHub Actions layer cache needs a buildx builder and the
+      # runtime token that only actions normally see.
+      - uses: docker/setup-buildx-action@v3
+      - uses: crazy-max/ghaction-github-runtime@v3
+
+      - name: Run the task
+        env:
+          DISPATCH: ${{ inputs.dispatch }}
+          # Read-only; the script uses it only to fetch the target, and never
+          # stores it in the clone.
+          GITHUB_TOKEN: ${{ github.token }}
+          FACTORY_BUILD_CACHE: gha
+          # The step's env is as narrow as Actions allows (secrets can't be
+          # scoped to part of a step). The script deletes it from its own
+          # environment before it runs anything, and hands it only to the
+          # agent's `docker exec`: git, the image build, setup and the check
+          # never see it. Only npx/tsx, which start the script, inherit it.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The App's bot identity, which authors every commit an agent makes.
+          # The email is <bot user id>+<name>@users.noreply.github.com; the
+          # id is `gh api '/users/<app-slug>%5Bbot%5D' --jq .id`.
+          FACTORY_BOT_NAME: "swfactory-bot[bot]"
+          FACTORY_BOT_EMAIL: "359948932+swfactory-bot[bot]@users.noreply.github.com"
+        run: |
+          printf '%s' "$DISPATCH" > "$RUNNER_TEMP/dispatch.json"
+          cd .factory-runner
+          npx tsx runner/run-task.ts "$RUNNER_TEMP/dispatch.json" "$RUNNER_TEMP/factory-out" "$RUNNER_TEMP/factory-work"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: factory-run
+          path: ${{ runner.temp }}/factory-out/
+          retention-days: 7
+          if-no-files-found: ignore

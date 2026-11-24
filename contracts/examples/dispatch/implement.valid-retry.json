@@ -1,0 +1,22 @@
+{
+  "contract_version": 1,
+  "run_id": 415,
+  "repo": "octo/widgets",
+  "task": "implement",
+  "ticket": "123",
+  "ticket_markdown": "# Search ignores accents\n\nSearching for \"cafe\" doesn't find \"café\".\n\n## Explore findings\n\n...\n",
+  "base_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+  "branch": "factory/123-415",
+  "triggered_by": {
+    "login": "octocat",
+    "id": 583231
+  },
+  "enrolment_sha": "9f2c1e0a7d3b4c5e6f708192a3b4c5d6e7f80912",
+  "model": "claude-opus-4-6",
+  "timeout_minutes": 45,
+  "previous_attempt": {
+    "outcome": "failed",
+    "failure": "check_failed",
+    "check_output": "FAILED tests/test_search.py::test_accents - AssertionError\n1 failed, 41 passed in 2.31s\n"
+  }
+}

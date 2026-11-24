@@ -1,0 +1,4 @@
+setup: uv sync
+check: uv run pytest
+timeouts:
+  implemnt: 55

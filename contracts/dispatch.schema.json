@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ScottMRedmond/swfactory/contracts/dispatch.schema.json",
+  "title": "Dispatch",
+  "description": "What the orchestrator sends a runner for one run. One JSON object, passed as a single workflow_dispatch input. It holds no secrets: anyone who can read the target repo's runs can read it.",
+  "oneOf": [
+    {"$ref": "#/$defs/explore"},
+    {"$ref": "#/$defs/implement"},
+    {"$ref": "#/$defs/review"},
+    {"$ref": "#/$defs/auto-tickets"},
+    {"$ref": "#/$defs/smoke"}
+  ],
+  "$defs": {
+    "contract_version": {
+      "description": "Shared by dispatch.schema.json and result.schema.json. Bump it whenever either schema changes.",
+      "const": 1
+    },
+    "run_id": {
+      "description": "The orchestrator's runs.id for this dispatch.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "repo": {
+      "description": "The target repo, as owner/name.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"
+    },
+    "ticket": {
+      "description": "An opaque ticket id (an issue number today), so another tracker's ids fit.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "ticket_markdown": {
+      "description": "The ticket rendered to markdown by the orchestrator; the task reads it as ticket.md.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65535
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "model": {
+      "description": "The Claude model the runner passes to Claude Code.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "timeout_minutes": {
+      "description": "The whole job's timeout. run.yml caps it at 60.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "branch": {
+      "description": "The branch name the orchestrator chose.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "triggered_by": {
+      "description": "The GitHub user who triggered the workflow. Commits get a Co-Authored-By trailer naming them at <id>+<login>@users.noreply.github.com.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["login", "id"],
+      "properties": {
+        "login": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"},
+        "id": {"type": "integer", "minimum": 1}
+      }
+    },
+    "older_issues": {
+      "description": "The most recent open issues older than the ticket, newest first, for spotting duplicates and overlaps.",
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ticket", "title"],
+        "properties": {
+          "ticket": {"$ref": "#/$defs/ticket"},
+          "title": {"type": "string", "maxLength": 1024}
+        }
+      }
+    },
+    "previous_attempt": {
+      "description": "On a retry: how the previous attempt ended, so the task can render a Previous attempt section in ticket.md.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {"enum": ["failed", "invalid"]},
+        "failure": {"$ref": "result.schema.json#/$defs/failure"},
+        "check_output": {
+          "description": "The last 50 lines of the previous attempt's check output. May be trimmed to fit the dispatch.",
+          "type": "string",
+          "maxLength": 20000
+        },
+        "validation_error": {
+          "description": "Why the previous attempt's result was invalid.",
+          "type": "string",
+          "maxLength": 20000
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "failed"}}},
+          "then": {"required": ["failure"], "not": {"required": ["validation_error"]}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "invalid"}}},
+          "then": {"required": ["validation_error"], "not": {"required": ["failure"]}}
+        }
+      ]
+    },
+    "explore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version", "run_id", "repo", "task", "ticket", "ticket_markdown",
+        "older_issues", "base_sha", "enrolment_sha", "model", "timeout_minutes"
+      ],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/contract_version"},
+        "run_id": {"$ref": "#/$defs/run_id"},
+        "repo": {"$ref": "#/$defs/repo"},
+        "task": {"const": "explore"},
+        "ticket": {"$ref": "#/$defs/ticket"},
+        "ticket_markdown": {"$ref": "#/$defs/ticket_markdown"},
+        "older_issues": {"$ref": "#/$defs/older_issues"},
+        "base_sha": {"$ref": "#/$defs/sha"},
+        "enrolment_sha": {"$ref": "#/$defs/sha"},
+        "model": {"$ref": "#/$defs/model"},
+        "timeout_minutes": {"$ref": "#/$defs/timeout_minutes"},
+        "previous_attempt": {"$ref": "#/$defs/previous_attempt"}
+      }
+    },
+    "implement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version", "run_id", "repo", "task", "ticket", "ticket_markdown",
+        "base_sha", "branch", "triggered_by", "enrolment_sha", "model", "timeout_minutes"
+      ],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/contract_version"},
+        "run_id": {"$ref": "#/$defs/run_id"},
+        "repo": {"$ref": "#/$defs/repo"},
+        "task": {"const": "implement"},
+        "ticket": {"$ref": "#/$defs/ticket"},
+        "ticket_markdown": {"$ref": "#/$defs/ticket_markdown"},
+        "base_sha": {"$ref": "#/$defs/sha"},
+        "branch": {"$ref": "#/$defs/branch"},
+        "triggered_by": {"$ref": "#/$defs/triggered_by"},
+        "enrolment_sha": {"$ref": "#/$defs/sha"},
+        "model": {"$ref": "#/$defs/model"},
+        "timeout_minutes": {"$ref": "#/$defs/timeout_minutes"},
+        "previous_attempt": {"$ref": "#/$defs/previous_attempt"}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version", "run_id", "repo", "task", "ticket", "ticket_markdown",
+        "pr_number", "pr_base_sha", "findings_only", "base_sha", "branch",
+        "triggered_by", "enrolment_sha", "model", "timeout_minutes"
+      ],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/contract_version"},
+        "run_id": {"$ref": "#/$defs/run_id"},
+        "repo": {"$ref": "#/$defs/repo"},
+        "task": {"const": "review"},
+        "ticket": {"$ref": "#/$defs/ticket"},
+        "ticket_markdown": {
+          "$ref": "#/$defs/ticket_markdown",
+          "description": "The review's rendered input: the PR's filtered comments and the ticket or spec it's reviewed against."
+        },
+        "pr_number": {"type": "integer", "minimum": 1},
+        "pr_base_sha": {
+          "$ref": "#/$defs/sha",
+          "description": "The PR's base commit, so the runner can fetch the diff and restore agent instructions from the base."
+        },
+        "findings_only": {
+          "description": "Push nothing: changes review would have made become findings (PRs the factory didn't open).",
+          "type": "boolean"
+        },
+        "base_sha": {"$ref": "#/$defs/sha", "description": "The PR head the review starts from."},
+        "branch": {"$ref": "#/$defs/branch", "description": "The PR's head branch."},
+        "triggered_by": {"$ref": "#/$defs/triggered_by"},
+        "enrolment_sha": {"$ref": "#/$defs/sha"},
+        "model": {"$ref": "#/$defs/model"},
+        "timeout_minutes": {"$ref": "#/$defs/timeout_minutes"},
+        "previous_attempt": {"$ref": "#/$defs/previous_attempt"}
+      }
+    },
+    "auto-tickets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version", "run_id", "repo", "task", "ticket", "ticket_markdown",
+        "older_issues", "base_sha", "enrolment_sha", "model", "timeout_minutes"
+      ],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/contract_version"},
+        "run_id": {"$ref": "#/$defs/run_id"},
+        "repo": {"$ref": "#/$defs/repo"},
+        "task": {"const": "auto-tickets"},
+        "ticket": {"$ref": "#/$defs/ticket", "description": "The spec issue."},
+        "ticket_markdown": {
+          "$ref": "#/$defs/ticket_markdown",
+          "description": "The rendered spec, with the spec exploration notes."
+        },
+        "older_issues": {"$ref": "#/$defs/older_issues"},
+        "base_sha": {"$ref": "#/$defs/sha"},
+        "enrolment_sha": {"$ref": "#/$defs/sha"},
+        "model": {"$ref": "#/$defs/model"},
+        "timeout_minutes": {"$ref": "#/$defs/timeout_minutes"},
+        "previous_attempt": {"$ref": "#/$defs/previous_attempt"}
+      }
+    },
+    "smoke": {
+      "description": "No agent: build the image, run setup, run the check on base_sha (the default branch's head).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_version", "run_id", "repo", "task", "base_sha", "enrolment_sha", "timeout_minutes"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/contract_version"},
+        "run_id": {"$ref": "#/$defs/run_id"},
+        "repo": {"$ref": "#/$defs/repo"},
+        "task": {"const": "smoke"},
+        "base_sha": {"$ref": "#/$defs/sha"},
+        "enrolment_sha": {"$ref": "#/$defs/sha"},
+        "timeout_minutes": {"$ref": "#/$defs/timeout_minutes"}
+      }
+    }
+  }
+}

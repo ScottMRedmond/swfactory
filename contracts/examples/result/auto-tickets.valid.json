@@ -1,0 +1,30 @@
+{
+  "contract_version": 1,
+  "run_id": 431,
+  "task": "auto-tickets",
+  "outcome": "succeeded",
+  "output": {
+    "verdict": "decomposed",
+    "tickets": [
+      {
+        "title": "Store saved searches",
+        "what_to_build": "A saved_searches table and a model to create, list and delete them.",
+        "acceptance_criteria": [
+          "A user can save the current query under a name",
+          "Saved searches survive a restart"
+        ],
+        "blocked_by": []
+      },
+      {
+        "title": "Show saved searches in the sidebar",
+        "what_to_build": "List the user's saved searches in the sidebar; clicking one runs it.",
+        "acceptance_criteria": [
+          "The sidebar lists saved searches by name",
+          "Clicking one runs its query"
+        ],
+        "blocked_by": [0],
+        "related": ["123"]
+      }
+    ]
+  }
+}

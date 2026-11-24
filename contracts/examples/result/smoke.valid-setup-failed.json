@@ -1,0 +1,7 @@
+{
+  "contract_version": 1,
+  "run_id": 401,
+  "task": "smoke",
+  "outcome": "failed",
+  "failure": "setup_failed"
+}

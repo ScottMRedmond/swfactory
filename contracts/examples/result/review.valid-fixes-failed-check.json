@@ -1,0 +1,29 @@
+{
+  "contract_version": 1,
+  "run_id": 421,
+  "task": "review",
+  "outcome": "failed",
+  "failure": "check_failed",
+  "check_before": {
+    "passed": true,
+    "output_tail": "42 passed in 2.10s\n"
+  },
+  "check_after": {
+    "passed": false,
+    "output_tail": "FAILED tests/test_search.py::test_empty_query\n1 failed, 41 passed in 2.20s\n"
+  },
+  "output": {
+    "standards": {
+      "verdict": "pass",
+      "reasoning": "Fixed the one naming issue."
+    },
+    "spec": {
+      "verdict": "no-ticket",
+      "reasoning": "The PR closes no issue."
+    },
+    "comments": [],
+    "fixed": [
+      "review: standards: rename q to query"
+    ]
+  }
+}

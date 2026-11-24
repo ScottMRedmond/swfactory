@@ -1,0 +1,2 @@
+setup: npm ci && npm run db:migrate && npm run db:seed
+check: npm run check

@@ -1,0 +1,14 @@
+{
+  "contract_version": 1,
+  "run_id": 414,
+  "task": "implement",
+  "outcome": "succeeded",
+  "check": {
+    "passed": true,
+    "output_tail": "42 passed in 2.10s\n"
+  },
+  "output": {
+    "verdict": "built",
+    "pr_body": "The ticket asked for accent-insensitive search. Search now folds accents on both sides; sorting is unchanged."
+  }
+}
