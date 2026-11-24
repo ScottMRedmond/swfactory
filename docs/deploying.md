@@ -334,34 +334,53 @@ Stop the service, then copy `factory.db` (or last night's backup) to the new mac
 
 **Never run two orchestrators at once.** Both would act on the same labels, and push, comment and dispatch twice. Stop the old one before starting the new one.
 
-### Moving off the Mac mini (once)
+### Taking it off the Mac mini (once)
 
-The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`. To move it to the PC:
+The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`. This takes it off and keeps its database for the PC. It doesn't need the PC to be ready: until the PC's service starts, nothing reacts to trigger labels, and they wait on GitHub.
 
-1. Do steps 0–6 on the PC. Don't start the service yet.
-2. Stop the Mac mini's jobs and take a consistent copy of the database. As an admin on the Mac mini:
+1. **Let runs in flight finish.** As `SWFactory`: `factory pause`, then wait until `factory status` shows no runs in flight. Pausing stops dispatching but keeps collecting. A run still in flight when the orchestrator stops is only collected if the database reaches the PC within 7 days, while the runner keeps its files.
+2. **Keep the database.** As `SWFactory`: `factory backup`. Then from the laptop:
+
+   ```sh
+   scp SWFactory@macmini:.factory/backups/factory-<date>.db ~/factory-handover.db
+   chmod 600 ~/factory-handover.db
+   ```
+
+   It holds rendered tickets from private repos, so keep it private, and delete it once the PC is running. It's also paused, which step 1 stored in it.
+3. **Stop the jobs and remove them, so nothing starts at boot.** As an admin on the Mac mini:
 
    ```sh
    sudo launchctl bootout system/local.factory.orchestrator
    sudo launchctl bootout system/local.factory.backup
-   ```
-
-   Then, as `SWFactory`: `factory backup`. Its newest `~/.factory/backups/factory-<date>.db` is the copy to move.
-3. From the laptop, move it across, then delete the laptop's copy:
-
-   ```sh
-   scp SWFactory@macmini:.factory/backups/factory-<date>.db /tmp/factory.db
-   scp /tmp/factory.db swfactory@factory-pc:.factory/factory.db
-   rm /tmp/factory.db
-   ```
-
-4. Do steps 7–8 on the PC, then [Backups](#backups). Check `factory status` shows the history and a fresh poll.
-5. Revoke the Mac mini's App key on the App's settings page.
-6. Clean up the Mac mini, as an admin:
-
-   ```sh
    sudo rm /Library/LaunchDaemons/local.factory.orchestrator.plist /Library/LaunchDaemons/local.factory.backup.plist
    sudo rm /etc/sudoers.d/factory
    ```
 
-   Then System Settings → Users & Groups: delete `SWFactory` and its home folder, which removes its key, database, backups and Claude login. Turn off **Remote Login** in Sharing if nothing else uses it, and remove `/etc/ssh/sshd_config.d/100-factory.conf` if you want password login back.
+   `bootout` stops a job now; removing its plist is what stops it starting at the next boot. Check:
+
+   ```sh
+   sudo launchctl print system/local.factory.orchestrator   # "Could not find service"
+   sudo launchctl print system/local.factory.backup         # "Could not find service"
+   ls /Library/LaunchDaemons | grep factory                  # nothing
+   sudo visudo -c                                            # every file parsed OK
+   ```
+
+   If System Settings → General → Login Items & Extensions listed the factory's jobs under **Allow in the Background**, they're gone from there too. Restart the Mac mini and run the `launchctl print` checks again to be sure.
+4. **Sign out Claude Code.** As `SWFactory`: `claude auth logout`.
+5. **Revoke the Mac mini's App key.** On the App's settings page, under **Private keys**, delete the key made for the Mac mini (match it by its creation date). Nothing uses it once the job is gone.
+6. **Delete the `SWFactory` user.** End any SSH sessions as `SWFactory` first. Then System Settings → Users & Groups → ⓘ next to `SWFactory` → **Delete User**, choosing **Delete the home folder**. That removes the key file, the database, its backups and the Claude login. Check: `id SWFactory` says there's no such user, and `/Users/SWFactory` is gone.
+7. **Tidy up, if you want:**
+   - Turn off **Remote Login** in Sharing if nothing else uses it, and remove `/etc/ssh/sshd_config.d/100-factory.conf` to allow password login again.
+   - `brew uninstall python@3.12` if nothing else uses it.
+   - Leave the other family home folders at mode 700: it's harmless and keeps them private.
+   - Time Machine still holds old copies of `SWFactory`'s home, App key included. The key is revoked, so they're harmless; delete those backups if you'd rather not keep them.
+   - Remove the `macmini` entry from the laptop's `~/.ssh/config` if only the factory used it.
+
+**Then, on the PC:** do steps 0–6, copy the database across, and delete the laptop's copy:
+
+```sh
+scp ~/factory-handover.db swfactory@factory-pc:.factory/factory.db
+rm ~/factory-handover.db
+```
+
+Then do steps 7–8, run `factory resume` as `swfactory`, set up [Backups](#backups), and check `factory status` shows the history and a fresh poll.
