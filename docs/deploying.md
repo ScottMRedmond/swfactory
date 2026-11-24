@@ -21,14 +21,21 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
 
 1. System Settings → Users & Groups: add a **Standard** user named `SWFactory`. Other family accounts must be non-admin, so they can't read its files.
 2. System Settings → General → Sharing: turn on **Remote Login**, allowed for `SWFactory` (and your own admin account).
-3. Turn off password login for SSH. Add to `/etc/ssh/sshd_config.d/100-factory.conf`:
+3. While passwords still work, put your laptop's public key on the Mac mini, and check it gets in:
+
+   ```sh
+   ssh-copy-id SWFactory@macmini
+   ssh SWFactory@macmini true
+   ```
+
+   Do the same for your admin account if you want to reach it over SSH: after the next step, an account with no key can only be used at the keyboard.
+4. Turn off password login for SSH. Add to `/etc/ssh/sshd_config.d/100-factory.conf`:
 
    ```
    PasswordAuthentication no
    KbdInteractiveAuthentication no
    ```
 
-4. Put your laptop's public key in `/Users/SWFactory/.ssh/authorized_keys` (mode 600, owned by `SWFactory`), and check `ssh SWFactory@macmini` works before closing your existing session.
 5. Check from the laptop that the key gets in and a password is refused:
 
    ```sh
@@ -50,12 +57,12 @@ As `SWFactory`:
 git clone https://github.com/ScottMRedmond/swfactory.git ~/swfactory
 cd ~/swfactory
 git checkout <release tag>
-python3 -m venv orchestrator/.venv
+/opt/homebrew/bin/python3.12 -m venv orchestrator/.venv   # not plain python3, which may be macOS's 3.9
 orchestrator/.venv/bin/pip install ./orchestrator
 mkdir -p ~/.factory && chmod 700 ~/.factory
 ```
 
-Put `orchestrator/.venv/bin` on `SWFactory`'s `PATH` (in `~/.zprofile`), so `ssh SWFactory@macmini factory status` works.
+Put `~/swfactory/orchestrator/.venv/bin` on `SWFactory`'s `PATH` in `~/.zshenv`, so `ssh SWFactory@macmini factory status` works. Not `~/.zprofile`: zsh reads that only for a login shell, and `ssh` with a command doesn't start one.
 
 ### 4. The GitHub App key
 
@@ -108,6 +115,15 @@ factory logs --follow
 ```
 
 If it won't stay up, look in `~/.factory/launchd.log` first.
+
+Check it comes back by itself, once after a crash and once after a reboot:
+
+```sh
+sudo kill <pid>       # the pid from launchctl print
+sudo launchctl print system/local.factory.orchestrator | grep pid   # a new pid within about 30 seconds
+sudo reboot           # then, without logging in at the Mac mini:
+ssh SWFactory@macmini factory status
+```
 
 ### 7. Let `SWFactory` restart its own job
 
@@ -204,7 +220,7 @@ sudo chown root:wheel /Library/LaunchDaemons/local.factory.backup.plist
 sudo chmod 644 /Library/LaunchDaemons/local.factory.backup.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.backup.plist
 sudo launchctl kickstart system/local.factory.backup   # one backup now, to check it
-ls ~SWFactory/.factory/backups/                         # today's copy
+sudo ls /Users/SWFactory/.factory/backups/              # today's copy
 ```
 
 If a night's copy is missing, look in `~/.factory/backup.log`. A missing or unreadable database fails the backup and leaves the old copies alone.
