@@ -1,0 +1,36 @@
+# The orchestrator as a systemd service on the factory PC: started at boot,
+# restarted when it exits, run as the `swfactory` user. Install it with the
+# steps in docs/deploying.md.
+#
+# The App's id and key path come from ~swfactory/.factory/orchestrator.env,
+# which `factory doctor` reads too, so the unit itself needs no editing.
+
+[Unit]
+Description=Software factory orchestrator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=swfactory
+Group=swfactory
+WorkingDirectory=/home/swfactory
+Environment=HOME=/home/swfactory
+# The orchestrator runs `git` and `claude` (to read usage); the native
+# Claude Code installer puts `claude` in ~/.local/bin.
+Environment=PATH=/home/swfactory/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/swfactory/.factory/orchestrator.env
+ExecStart=/home/swfactory/swfactory/orchestrator/.venv/bin/factory serve
+
+Restart=always
+# Wait 30 seconds between restarts, so a crash loop doesn't spin.
+RestartSec=30
+
+# stdout and stderr go to the journal, which catches anything printed before
+# the orchestrator's own log starts: `sudo journalctl -u factory-orchestrator`.
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

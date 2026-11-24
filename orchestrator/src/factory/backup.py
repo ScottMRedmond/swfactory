@@ -1,6 +1,6 @@
 """`factory backup`: copy the SQLite file to `<dir>/factory-<date>.db`.
 
-Run nightly by launchd (docs/deploying.md#backups). It uses SQLite's online
+Run nightly by a systemd timer (docs/deploying.md#backups). It uses SQLite's online
 backup, so the copy is consistent while the orchestrator is writing.
 """
 

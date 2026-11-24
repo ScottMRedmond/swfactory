@@ -20,7 +20,7 @@ Out of scope for v1:
 - new tasks (v1 starts from today's Sandcastle tasks; adapting them to the Python project is task design)
 - migrating the cohort repo (it keeps its Actions factory until the course ends, then is retired)
 - webhooks
-- running agents on the Mac mini
+- running agents on the factory PC
 - a web runs page
 
 ## Services
@@ -29,19 +29,19 @@ Out of scope for v1:
 |---|---|
 | Ticket tracker | GitHub Issues: each enrolled repo's own issues |
 | Git host | GitHub: each enrolled repo's own GitHub repo |
-| Orchestrator | Our own Python process on the family Mac mini (see [orchestrator.md](orchestrator.md)) |
+| Orchestrator | Our own Python process on the factory PC, a small Linux machine (see [orchestrator.md](orchestrator.md)) |
 | Runner | GitHub Actions, behind a Runner interface |
 | Observability platform | None. Status comments, notices, factory problem issues, Actions logs and a CLI are enough (see [Observability](orchestrator.md#observability)) |
 
 ## Orchestrator
 
-The orchestrator is our own Python process on the family Mac mini: **one process and one SQLite file**. It polls each enrolled repo for trigger labels, queues runs, dispatches them to runners, collects and validates their results, and chains tasks into workflows. It acts as a GitHub App and is **the only writer**: only the orchestrator pushes branches, opens PRs, posts comments and sets labels. Runners never write to GitHub.
+The orchestrator is our own Python process on the factory PC, a small Linux machine of its own ([ADR 0002](adr/0002-orchestrator-on-a-linux-mini-pc.md)): **one process and one SQLite file**. It polls each enrolled repo for trigger labels, queues runs, dispatches them to runners, collects and validates their results, and chains tasks into workflows. It acts as a GitHub App and is **the only writer**: only the orchestrator pushes branches, opens PRs, posts comments and sets labels. Runners never write to GitHub.
 
 Its full specification is in [orchestrator.md](orchestrator.md).
 
 ## Runners
 
-**Product.** GitHub Actions. The orchestrator talks to runners through a Runner interface, so it doesn't change if Actions is later replaced by a VM, Fly Machines or a self-hosted Mac mini. Agents do not run on the family Mac mini in v1: an unsandboxed agent next to family data is too risky.
+**Product.** GitHub Actions. The orchestrator talks to runners through a Runner interface, so it doesn't change if Actions is later replaced by a VM, Fly Machines or a self-hosted runner. Agents do not run on the factory PC in v1: an unsandboxed agent next to the App key and a developer's workspace is too risky.
 
 **Runs happen in the target repo.** The factory repo holds one **reusable workflow**, `run.yml`. Each enrolled repo holds a thin caller workflow of about 10 lines (`workflow_dispatch` → `uses: <owner>/<factory>/.github/workflows/run.yml@main`, with `permissions: contents: read`), and the orchestrator dispatches that caller. So each job runs in the target repo:
 
@@ -91,7 +91,7 @@ The factory repo stays public without revealing private repos: enrolments live i
   - Sandcastle is a TypeScript library, so a small TypeScript script has to sit between it and the Python orchestrator. The orchestrator runs the script as a subprocess, and they exchange the dispatch and the result as JSON files, as they do with `run.yml` today. Writing the orchestrator in TypeScript would remove the script, but isn't required.
   - You pay a sandbox provider instead of using the Actions allowance.
   - There are no Actions logs, so the factory has to store and link transcripts itself.
-  - The Claude token lives on the Mac mini and is passed into the sandbox for each run. The agent still doesn't run on the Mac mini.
+  - The Claude token lives on the factory PC and is passed into the sandbox for each run. The agent still doesn't run on the factory PC.
 
 v1 keeps Actions, because it needs no hardware, the logs come free, and the spending limit caps what it can cost.
 
@@ -325,7 +325,7 @@ Open questions about the orchestrator itself are in [orchestrator.md](orchestrat
 - **Network egress from the agent.** The agent has open internet access, so a prompt injection in an outsider's issue could get it to `curl` the Claude token somewhere; the prose scan only catches a token that lands in `output.json`. v1 accepts this: only someone with triage access can add a trigger label, so a human has seen the text first, and the token can be revoked and reissued. The first thing to try later is running setup with network access and the agent with none except Anthropic's API; an egress allowlist through a proxy is the alternative.
 - **Recording each run's usage.** An optional `usage` field in `result.json` (tokens, plus the run's `rate_limit_event` readings) would show what each task typically costs, and could tune the thresholds. Deferred until the usage pause has run for a while.
 - **Hosted minutes or our own hardware.** v1 runs a private repo on paid hosted minutes, capped at $20 a month (see [Visibility and cost](#runners)). At about $0.006 a minute on Linux, after the 2,000–3,000 included minutes, the factory flat out at 40 runs a day would cost roughly $170 a month, and about $33 at 10. If the first month shows the limit is too tight, the alternative is a runner on our own hardware:
-  - A Mac mini costs about $800–1,300 at 2026 prices. But `run.yml` builds Linux images, which need a VM on macOS, and Actions' container features are Linux-only, so a dedicated small Linux box would be the better buy.
+  - A Mac mini costs about $800–1,300 at 2026 prices. But `run.yml` builds Linux images, which need a VM on macOS, and Actions' container features are Linux-only, so a dedicated small Linux box would be the better buy. It would be a **separate** machine from the factory PC, which holds the App key and is the development machine (see [ADR 0002](adr/0002-orchestrator-on-a-linux-mini-pc.md)).
   - The box would run each target's code with the Claude token, so it would need its own network, away from the family's, and **ephemeral** runners that re-register after every job. GitHub advises against self-hosted runners on public repos.
   - It needs upkeep: updates, disk cleanup, staying awake. Jobs wait in GitHub's queue while it sleeps, and fail after about 24 hours.
   - Self-hosted minutes are free today. GitHub announced a $0.002-a-minute fee for them on private repos from March 2026, then postponed it with no new date. If GitHub starts charging in a way that matters, revisit the factory's setup rather than pay.

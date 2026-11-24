@@ -1,0 +1,25 @@
+# The nightly database backup on the factory PC, started by
+# factory-backup.timer. `factory backup` keeps 14 daily copies in
+# ~swfactory/.factory/backups; restic then copies that folder, encrypted,
+# off the machine. Install it with the steps in docs/deploying.md#backups.
+
+[Unit]
+Description=Software factory database backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=swfactory
+Group=swfactory
+WorkingDirectory=/home/swfactory
+Environment=HOME=/home/swfactory
+# RESTIC_REPOSITORY, RESTIC_PASSWORD_FILE and the storage's credentials.
+EnvironmentFile=/home/swfactory/.factory/restic.env
+ExecStart=/home/swfactory/swfactory/orchestrator/.venv/bin/factory backup
+ExecStart=/usr/bin/restic backup --host factory-pc /home/swfactory/.factory/backups
+ExecStart=/usr/bin/restic forget --host factory-pc --keep-daily 30 --prune
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full

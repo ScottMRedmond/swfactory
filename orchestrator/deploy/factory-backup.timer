@@ -1,0 +1,12 @@
+# Runs factory-backup.service nightly at 03:30. Persistent: if the PC was off
+# at 03:30, the backup runs as soon as it's back.
+
+[Unit]
+Description=Nightly software factory database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
