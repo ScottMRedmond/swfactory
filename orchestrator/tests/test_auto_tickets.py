@@ -214,7 +214,7 @@ def test_after_a_crash_halfway_it_finishes_from_the_stored_result_and_skips_made
         if request.method == "POST" and request.url.endswith(f"/repos/{REPO}/issues"):
             posts += 1
             if posts == 2:
-                raise OSError("the Mac mini lost power")
+                raise OSError("the factory PC lost power")
         return fake(request)
 
     crashing = GitHub(AppAuth(APP_ID, PRIVATE_KEY, fake, clock=fake.clock),

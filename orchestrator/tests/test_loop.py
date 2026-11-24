@@ -154,7 +154,7 @@ def test_a_running_run_is_left_alone(conn, runner):
 
 
 def test_a_run_finished_long_ago_is_still_collected(conn, runner, tmp_path):
-    # The Mac mini slept; on waking the orchestrator starts afresh and collects.
+    # The orchestrator was down; on restart it starts afresh and collects.
     run_id = enqueue_smoke(conn)
     loop.tick(conn, runner, limit=2)
     finish(runner, conn, run_id, smoke_result(run_id))

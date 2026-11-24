@@ -6,13 +6,15 @@ The orchestrator is written in **Python**. Its language is independent of the ta
 
 ## Where it runs
 
-On the family Mac mini (M2, 24 GB), which is on most of the time.
+On the **factory PC**, a small Linux machine of its own (a Lenovo ThinkCentre M80q Tiny running Ubuntu Server), which is always on. It moved there from the family Mac mini; why is in [ADR 0002](adr/0002-orchestrator-on-a-linux-mini-pc.md).
 
-- It runs under a dedicated `SWFactory` macOS user, so other non-admin family accounts can't read its secrets.
-- launchd starts it at boot and restarts it when it crashes.
-- The Mac mini may sleep. Runs happen on the runner, not the Mac mini, so a run in flight keeps going and its files wait on the runner; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
+- It runs under a dedicated `swfactory` Linux user, whose home only it can read.
+- The same PC is the development machine, under the developer's own account. That account has no passwordless sudo and uses rootless Docker, so nothing working as the developer, agents included, can read the orchestrator's secrets. No agent runs on the PC: runs happen on the runner.
+- systemd starts it at boot and restarts it when it crashes.
+- If the PC is off or the orchestrator is down, a run in flight keeps going on the runner and its files wait there; only new triggers, collecting and the next dispatch wait until it's back. To stop spending usage, `factory pause`, remove trigger labels or stop the service.
 - It is managed from the development laptop over SSH, on the home network only. Access from away (e.g. Tailscale) is left for later.
-- Its database is copied nightly by `factory backup` (a second launchd job), and Time Machine takes the copies off the machine.
+- Its database is copied nightly by `factory backup` (a systemd timer), and restic takes the copies off the machine, encrypted.
+- How to set it up is in [deploying.md](deploying.md).
 
 The orchestrator is **one process and one SQLite file**, so moving it to a VM or another machine means copying that file and giving the new machine its own App key.
 
@@ -56,8 +58,8 @@ The orchestrator talks to runners only through the **Runner interface** (see [Ke
 
 On startup and on each poll, the orchestrator looks up every `dispatched` row, always asking the runner for the run's state first:
 
-- If the run has finished, it collects the files, however late. After a sleep, many runs are past 60 minutes and finished; they are collected normally.
-- If the run is missing, or finished without files, the outcome is `failed`. A runner keeps a run's files for a limited time, so a Mac mini asleep longer than that finds them gone, and the normal attempts rule retries it.
+- If the run has finished, it collects the files, however late. After a long outage, many runs are past 60 minutes and finished; they are collected normally.
+- If the run is missing, or finished without files, the outcome is `failed`. A runner keeps a run's files for a limited time, so an orchestrator down longer than that finds them gone, and the normal attempts rule retries it.
 - Only if the run is *still running* 15 minutes past its task's timeout (for queueing and upload; see [Limits and brakes](#limits-and-brakes)), it cancels the run and records `timed_out`. The runner enforces the timeout itself too, so the limit holds even while the orchestrator is down. The limit lives in one place, the orchestrator's config, and travels in the dispatch.
 
 Once it has the files, the orchestrator validates `result.json` and the bundle against [the runner contract](software-factory.md#the-runner-contract), then does all the writing to GitHub. An invalid result counts as a failed attempt, and nothing is written to GitHub. If the orchestrator is offline when a run finishes, the files wait on the runner until the orchestrator collects them.
@@ -86,7 +88,7 @@ When a human closes a ticket, spec or PR that has active rows, the orchestrator 
 
 `factory cancel <run>` cancels one in-flight run by hand (see [Limits and brakes](#limits-and-brakes)).
 
-**A PR closed while the orchestrator was down or asleep.** The full scan on startup or waking lists only open issues and PRs, so it finds a factory PR closed without merging only while its ticket (or spec) is still open: a missing PR whose ticket is open was closed by hand, while a merged PR closes its ticket. A PR closed while its ticket was closed too is skipped, and its workflow stays as it was; no call is made per closed ticket in the history.
+**A PR closed while the orchestrator was down.** The full scan on startup or after a gap lists only open issues and PRs, so it finds a factory PR closed without merging only while its ticket (or spec) is still open: a missing PR whose ticket is open was closed by hand, while a merged PR closes its ticket. A PR closed while its ticket was closed too is skipped, and its workflow stays as it was; no call is made per closed ticket in the history.
 
 ## Triggers
 
@@ -95,7 +97,7 @@ The orchestrator **polls** each enrolled repo about every 60 seconds for trigger
 - Nothing reaches into the home network: there are no webhooks, no public URL and no port forwarding.
 - Webhooks are deferred. A one-minute delay doesn't matter next to runs that take up to 45 minutes. The interval is fixed: no faster polling while a run is in flight.
 - **One call per repo per poll:** `GET /repos/{owner}/{repo}/issues?state=all&since=<cursor − 2 min>&sort=updated`, sent with the last ETag. It returns issues and PRs, so it finds new trigger labels and closed issues and PRs (for [Cancelling](#cancelling)) in one go. An idle repo answers 304, which doesn't count against the App's rate limit (at least 5,000 requests an hour per installation). Checking `dispatched` rows adds at most one call per run in flight. Adding a label does bump `updated_at` (tested). The list can lag the change by some seconds: a `since` query right after a label was added missed it, and the same query a minute later found it. The 2-minute overlap covers that.
-- **Catching up:** the cursor and ETag live in memory. On startup, and on waking (any gap of more than 5 minutes between polls), the orchestrator scans every open issue and PR instead, fetches fresh App tokens and a fresh usage reading, and then resumes the cheap poll. No trigger is lost while it's down or asleep, and the dispatch limits still apply, so a long sleep doesn't cause a burst.
+- **Catching up:** the cursor and ETag live in memory. On startup, and after a gap (more than 5 minutes between polls), the orchestrator scans every open issue and PR instead, fetches fresh App tokens and a fresh usage reading, and then resumes the cheap poll. No trigger is lost while it's down, and the dispatch limits still apply, so a long outage doesn't cause a burst.
 - **Errors:** each repo has its own backoff. On a 5xx or a network error, the wait between polls doubles, up to 15 minutes, and drops back to 60 seconds after one success. On a 403 or 429 rate limit, it waits as long as `Retry-After` or `x-ratelimit-reset` says. After 30 minutes of failures it logs an error and opens a [factory problem](#observability) issue.
 - On finding a trigger label, the orchestrator **inserts the row first, then removes the label**. A crash between the two leaves a duplicate trigger, not a lost one, and the next poll skips it because a `queued` or `dispatched` row already exists for that repo, task and ticket. Removing the label is also what makes "re-add the label" mean "run again".
 - **Who can trigger:** only people with triage access or higher can add labels, even on a public repo, so the label permission is the access check. The orchestrator doesn't check again, but records who added it as `triggered_by`.
@@ -112,7 +114,7 @@ When a run starts on a ticket or PR, the orchestrator removes any stale status l
 
 ## Reading Claude usage
 
-Before each dispatch, the orchestrator reads the Claude subscription's usage with `claude -p "/usage" --output-format stream-json --verbose`, which makes no model call, and reuses a reading less than 5 minutes old. With about 20 runs a day, that's a few dozen checks a day; the usage endpoint can itself be rate limited and publishes no safe rate. Claude Code is installed under the `SWFactory` user with a full `claude auth login`, because `/usage` needs the `user:profile` scope. Tested: with a full login it returns a `usage_report` whose `rate_limits.limits[]` has `session` and `weekly_all` rows; with a `setup-token` token (Claude Code 2.1.330) it prints only the session's cost summary, with no `usage_report` at all. The orchestrator uses Claude Code only to read usage, never to run a model. The runners keep their `setup-token` token. See [Usage pause](#limits-and-brakes) for what it does with the reading, and `research/claude-usage-from-script.md` for the sources.
+Before each dispatch, the orchestrator reads the Claude subscription's usage with `claude -p "/usage" --output-format stream-json --verbose`, which makes no model call, and reuses a reading less than 5 minutes old. With about 20 runs a day, that's a few dozen checks a day; the usage endpoint can itself be rate limited and publishes no safe rate. Claude Code is installed under the `swfactory` user with a full `claude auth login`, because `/usage` needs the `user:profile` scope. Tested: with a full login it returns a `usage_report` whose `rate_limits.limits[]` has `session` and `weekly_all` rows; with a `setup-token` token (Claude Code 2.1.330) it prints only the session's cost summary, with no `usage_report` at all. The orchestrator uses Claude Code only to read usage, never to run a model. The runners keep their `setup-token` token. See [Usage pause](#limits-and-brakes) for what it does with the reading, and `research/claude-usage-from-script.md` for the sources.
 
 ## Identity
 
@@ -123,7 +125,7 @@ The orchestrator acts as a **GitHub App**, which gives it a bot identity. The Ap
 - The App never adds trigger labels. A trigger label added by the App's identity is removed without starting a run, so a bug can't start a loop.
 - The first time it polls a repo, the orchestrator creates any missing factory labels (trigger labels, status labels, `spec`, `spec:<n>`). It never edits a label that already exists.
 - Tokens are short-lived and scoped to one repo.
-- The App's private key exists only on the Mac mini.
+- The App's private key exists only on the factory PC, readable only by `swfactory`.
 - `FACTORY_PAT` is retired.
 
 **The orchestrator is the only writer.** Only the orchestrator pushes branches, opens PRs, posts comments and sets labels. Runners never write to GitHub.
@@ -373,7 +375,7 @@ The limits live in one config file, and each repo can override them:
 - **Per-spec concurrency (`per_spec_concurrency`):** at most 1 ticket per [implement-spec](#implement-spec) workflow queued or in flight at once, so every landing on the integration branch is a fast-forward. It's enforced when the spec's tickets are queued, not by the dispatch loop, so it never shows as a hold on a status comment. It can be raised to build a spec's independent tickets in parallel, within the global limit.
 - **Per-issue concurrency (`per_issue_concurrency`):** at most 1 active run per issue or PR, whatever the task (see [Triggers](#triggers)). Raising it later needs a rule for runs that push to the same branch (two implements, or a review while implement is going), which would collide. Runs that only read, like explore, could share an issue safely.
 - **Attempts:** at most 2 per ticket per task, counted from the last human trigger. When attempt 1 ends `failed`, `invalid`, `timed_out` or `superseded` (including a merge conflict on an integration branch), the orchestrator inserts attempt 2 at once. Unless attempt 1 was `timed_out`, `superseded` or failed with `agent_timeout`, or failed without a `result.json` (the run went missing or left no files), which have nothing useful to say, attempt 2's dispatch carries `previous_attempt`: the `failure` reason, the last 50 lines of the check output from attempt 1's `result.json`, and for `invalid` the validation error. The task renders it as a "Previous attempt" section in `ticket.md`, so a second try at a `check_failed` ticket starts from what broke. If that ends badly too, it labels the ticket `agent:blocked` and stops. `cancelled` never retries, and neither does a `succeeded` run whose verdict is `needs-a-human`, which is an answer, not a failure. Re-adding the trigger label starts again at attempt 1.
-- **Daily cap:** about 40 runs a day, counting every row dispatched since local midnight on the Mac mini except `smoke` runs, which use no Claude usage: retries, `usage_limit` re-runs and `contract_mismatch` runs too, even though the last two aren't attempts, because a looping bug is exactly the kind that skips attempt counting. 40 lets a full spec (about 15–28 runs) finish in a day; with cheaper models on explore and auto-tickets, usage rather than run count is what normally stops the factory. Past the cap, queued rows stay `queued` until midnight, and each held-back run's line in its status comment says "queued: daily cap reached". It's a backstop behind the usage pause, for what a usage reading can't catch, such as a loop of short failing runs or a wrong reading.
+- **Daily cap:** about 40 runs a day, counting every row dispatched since local midnight on the factory PC except `smoke` runs, which use no Claude usage: retries, `usage_limit` re-runs and `contract_mismatch` runs too, even though the last two aren't attempts, because a looping bug is exactly the kind that skips attempt counting. 40 lets a full spec (about 15–28 runs) finish in a day; with cheaper models on explore and auto-tickets, usage rather than run count is what normally stops the factory. Past the cap, queued rows stay `queued` until midnight, and each held-back run's line in its status comment says "queued: daily cap reached". It's a backstop behind the usage pause, for what a usage reading can't catch, such as a loop of short failing runs or a wrong reading.
 - **Usage pause:** the real limit is the Claude subscription's 5-hour and weekly usage, which your own claude.ai and Claude Code use shares. The orchestrator doesn't dispatch when any 5-hour row of the usage reading is at or above **60%**, or any weekly row at or above **50%**, which leaves headroom for your own work. Both numbers are in the config, and are starting guesses to tune.
   - Every row counts. Per-model weekly rows (`weekly_scoped`) and any `kind` it doesn't know use the weekly threshold, because the report format is marked experimental.
   - While paused, it doesn't check again until the earliest relevant `resets_at`, because usage only falls at a reset.
@@ -387,14 +389,14 @@ Brakes:
 - **Automated checks:** the runner runs the repo's `check` command after implement, and before and after review; a failing check after the agent fails the run (see [Runners](software-factory.md#runners)). Explore and auto-tickets make no commits and run no check. Implement also runs the check itself while it works. Today the prompts *ask* the agent to pass `npm run check`, but no workflow step enforces it.
 - **Automated review:** the existing review task, chained by the orchestrator: once per PR in implement-ticket, and once at the end in implement-spec.
 - **Human review:** unchanged. A human merges every PR.
-- **Manual pause:** `factory pause` stops dispatching across all repos and `factory resume` starts it again; the flag is kept in SQLite, so it survives a restart. While paused, the orchestrator still polls, collects, cancels and posts, and each held-back run's line in its status comment says "queued: factory paused". `factory cancel <run>` asks for one in-flight run to be cancelled. The CLI only writes the request to SQLite; the orchestrator acts on it on its next loop, within about a minute. All three work over SSH. Stopping the launchd job is no longer the only brake.
+- **Manual pause:** `factory pause` stops dispatching across all repos and `factory resume` starts it again; the flag is kept in SQLite, so it survives a restart. While paused, the orchestrator still polls, collects, cancels and posts, and each held-back run's line in its status comment says "queued: factory paused". `factory cancel <run>` asks for one in-flight run to be cancelled. The CLI only writes the request to SQLite; the orchestrator acts on it on its next loop, within about a minute. All three work over SSH. Stopping the service is no longer the only brake.
 - **Per-repo pause:** `enabled: false` in the repo's `config.yml` (see [Enrolments](#enrolments)).
 
 **Queue order** is oldest first across all repos, with no priorities and no round-robin in v1. With `per_spec_concurrency` at 1, a spec takes one of the two slots, so the other keeps other work moving. To push something to the front, pause the factory or disable other repos for a while.
 
 ## Observability
 
-You see the factory in three places: on GitHub, in the issues it opens about itself, and through a CLI on the Mac mini.
+You see the factory in three places: on GitHub, in the issues it opens about itself, and through a CLI on the factory PC.
 
 **Status comment.** Each issue or PR the factory works on gets **one** status comment, marked `<!-- factory:status -->`, created when its first run is queued and edited in place from then on. It's never deleted. It has one line per run, newest last: the task, the attempt (`2/2`), the state, the reason it's held back or failed (`queued: factory paused`, `queued: daily cap reached`, `check_failed`, `timed_out`, …), how long it ran, and links to the run's log (from the runner) and the factory run id (for `factory runs 412`). A later trigger on the same issue adds a line to the same comment. On a spec issue it holds the spec's own runs (spec explore and auto-tickets) and a line linking the spec PR, whose progress list tracks the tickets. Editing a comment notifies nobody, so the status comment is for looking, not for alerting.
 
@@ -422,9 +424,9 @@ Success stays quiet, apart from the review request when a PR goes ready. Status 
 
 The daily cap and a usage pause never open one: they're the factory working as designed, and they show on status comments and in `factory status`. The issue names the problem and never includes a raw error body, which could hold a token or private data. `owner` is a GitHub login in `factory-config.yml` at the root of the factory repo's `main`, read on the same 10-minute refresh as the enrolments, so changing it is a commit.
 
-**Down or asleep.** There's no alert in v1. A dead-man's switch would fire every time the Mac mini sleeps, which it is meant to do. If nothing seems to be happening, `factory status` shows when the last poll ran, and launchd restarts the orchestrator after a crash.
+**Down.** There's no alert in v1. If nothing seems to be happening, `factory status` shows when the last poll ran, and systemd restarts the orchestrator after a crash. The factory PC is always on, so a dead-man's switch would now only fire on a real fault (it couldn't on the Mac mini, which slept); adding one is left for later.
 
-**The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `SWFactory` user (password login off), e.g. `ssh SWFactory@macmini factory status`.
+**The CLI.** `factory` runs on the factory PC and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `swfactory` user (password login off), e.g. `ssh swfactory@factory-pc factory status`.
 
 - `factory status`: whether the factory is paused, the latest usage reading and its age, today's count against the cap, runs in flight, the queue (oldest first, with why each is held), the last successful poll per repo, and open factory problems.
 - `factory runs`: the last 20 rows, filtered with `--repo`, `--ticket`, `--task`, `--outcome` and `--since`, or `--json`. `factory runs <id>` shows one row in full: dispatch, result, the check output's tail, the retry chain, and the log link.
@@ -436,7 +438,7 @@ The daily cap and a usage pause never open one: they're the factory working as d
 
 The read commands only read. The three writing commands only write to SQLite, and the orchestrator acts on them on its next loop; it's the only process that holds the App key or calls GitHub. SQLite runs in WAL mode, so the CLI never blocks the orchestrator.
 
-**Orchestrator logs.** JSON lines in a log file the orchestrator rotates itself, keeping 30 days. launchd sends stdout and stderr to a separate file, to catch a crash before logging starts. Every line about a run carries `run`, `repo` and `ticket`. Tokens and the App key are never logged, and the `sk-ant-` scan used on posted prose runs on log lines too.
+**Orchestrator logs.** JSON lines in a log file the orchestrator rotates itself, keeping 30 days. stdout and stderr go to the systemd journal, to catch a crash before logging starts. Every line about a run carries `run`, `repo` and `ticket`. Tokens and the App key are never logged, and the `sk-ant-` scan used on posted prose runs on log lines too.
 
 **Retention.** Agent transcripts live with the runner. On Actions they're in the logs, which last 90 days by default, and artifacts last 7 days. After that, `runs.dispatch` and `runs.result` are what's left. Transcripts aren't archived in v1.
 
@@ -445,7 +447,7 @@ The read commands only read. The three writing commands only write to SQLite, an
 ## Deploying
 
 - The orchestrator's code lives in the public factory repo (see [Code](software-factory.md#code)).
-- **Deploying the orchestrator** is by hand, from a tag: `git pull` the release, then `launchctl kickstart`. It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The enrolments and `factory-config.yml` it reads every 10 minutes are data, kept separate from the code it runs.
+- **Deploying the orchestrator** is by hand, from a tag: check out the release tag, reinstall, then `systemctl restart` (see [deploying.md](deploying.md#releasing-a-new-version)). It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The enrolments and `factory-config.yml` it reads every 10 minutes are data, kept separate from the code it runs.
 
 ## Open questions
 
