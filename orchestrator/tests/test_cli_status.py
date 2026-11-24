@@ -117,14 +117,25 @@ def test_a_paused_factory_holds_the_queue(world):
 
 
 def test_high_usage_holds_the_queue_until_its_reset(world):
-    resets = datetime(2026, 11, 22, 15, 45, tzinfo=UTC)
+    # Late today in local time, so it's "today" whenever the test runs.
+    resets = datetime.now().astimezone().replace(hour=23, minute=59, second=0, microsecond=0)
     state.record_usage(world.conn, usage(session=64, resets=resets), read_at=ago(minutes=1))
     world.queue()
 
     _, lines = section(status(world), "queue")
 
-    local = resets.astimezone().strftime("%-I:%M %p").lower()
-    assert lines[1].endswith(f"Claude 5-hour usage at 64%, resumes about {local}")
+    assert lines[1].endswith("Claude 5-hour usage at 64%, resumes about 11:59 pm")
+
+
+def test_a_reset_on_another_day_shows_its_day(world):
+    resets = (datetime.now().astimezone() + timedelta(days=2)).replace(
+        hour=10, minute=45, second=0, microsecond=0)
+    state.record_usage(world.conn, usage(session=64, resets=resets), read_at=ago(minutes=1))
+    world.queue()
+
+    _, lines = section(status(world), "queue")
+
+    assert lines[1].endswith(f"Claude 5-hour usage at 64%, resumes about {resets:%a} 10:45 am")
 
 
 def test_high_weekly_usage_holds_the_queue(world):
