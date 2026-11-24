@@ -31,6 +31,16 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
 
    Change only the home folder, so no `-R`. Other users then can't use that account's Public folder or Drop Box. If someone relies on them, use `711` for that account instead: others can reach `Public` but can't list the home folder. A new account starts readable again, so run this for each one you add. `/Users/Shared` stays readable by everyone, so keep nothing personal there. Check external drives too: an exFAT drive, or one with **Ignore ownership on this volume** ticked, is readable by every user.
 3. System Settings → General → Sharing: turn on **Remote Login**, allowed for `SWFactory` (and your own admin account).
+
+   This runbook calls the Mac mini `macmini`. Give the laptop that name in `~/.ssh/config`:
+
+   ```
+   Host macmini
+       HostName <IP address, or the Local hostname from the Sharing screen, ending in .local>
+       User SWFactory
+   ```
+
+   The Bonjour name only resolves with `.local` on the end. If you use the IP address, reserve it for the Mac mini in the router's DHCP settings, so it doesn't change.
 4. While passwords still work, put your laptop's public key on the Mac mini, and check it gets in:
 
    ```sh
@@ -86,7 +96,7 @@ ssh SWFactory@macmini chmod 600 .factory/app-key.pem
 
 Note the App's id (on the App's settings page). It goes in the plist.
 
-`~/.factory` is mode 700, so only `SWFactory` can read the key, the database and its backups. A new macOS home folder is readable by the `staff` group, which every family account is in, so this matters. Check it from another family account (one that isn't an admin):
+`~/.factory` is mode 700, so only `SWFactory` can read the key, the database and its backups, whatever the mode of its home folder. Check it from another family account (one that isn't an admin):
 
 ```sh
 ls /Users/SWFactory/.factory    # must fail with "Permission denied"
@@ -106,14 +116,20 @@ The orchestrator runs `claude -p /usage` before dispatching, to apply the [usage
 
 ### 6. The launchd job
 
+As an admin, with the App's id in place of `<app id>` (e.g. `s/REPLACE_WITH_APP_ID/1234567/`). The admin account can't read `SWFactory`'s home, so every command that reads from it uses `sudo` and a full path:
+
 ```sh
-cd /Users/SWFactory/swfactory
-sed 's/REPLACE_WITH_APP_ID/<app id>/' orchestrator/deploy/local.factory.orchestrator.plist \
+sudo sed 's/REPLACE_WITH_APP_ID/<app id>/' \
+    /Users/SWFactory/swfactory/orchestrator/deploy/local.factory.orchestrator.plist \
   | sudo tee /Library/LaunchDaemons/local.factory.orchestrator.plist > /dev/null
 sudo chown root:wheel /Library/LaunchDaemons/local.factory.orchestrator.plist
 sudo chmod 644 /Library/LaunchDaemons/local.factory.orchestrator.plist
+plutil -lint /Library/LaunchDaemons/local.factory.orchestrator.plist                  # OK
+grep -A1 FACTORY_APP_ID /Library/LaunchDaemons/local.factory.orchestrator.plist       # the App's id, not REPLACE_…
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrator.plist
 ```
+
+Check the plist before `bootstrap`: if `sed` fails, `tee` still writes an empty file.
 
 It's a daemon (in `/Library/LaunchDaemons`, with `UserName` set to `SWFactory`), so it starts at boot without anyone logging in, and `KeepAlive` restarts it when it exits. The plist holds the App id, which isn't secret, and the path to the key, not the key itself.
 
@@ -126,6 +142,12 @@ factory logs --follow
 ```
 
 If it won't stay up, look in `~/.factory/launchd.log` first.
+
+`factory doctor` (step 8) reads the App's identity from the shell, as `serve` does from the plist. As `SWFactory`, add both to `~/.zshenv`. Neither is secret:
+
+```sh
+printf 'export FACTORY_APP_ID=<app id>\nexport FACTORY_APP_KEY_FILE=$HOME/.factory/app-key.pem\n' >> ~/.zshenv
+```
 
 Check it comes back by itself, once after a crash and once after a reboot:
 
@@ -225,8 +247,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrato
 `factory backup` copies the database to `backups/factory-<date>.db` beside it (`~/.factory/backups/`) with SQLite's online backup, which is safe while the orchestrator runs, and deletes all but the newest 14 copies. A second launchd job, `orchestrator/deploy/local.factory.backup.plist`, runs it nightly at 03:30 as `SWFactory`. If the Mac mini is asleep then, launchd runs it when it wakes. Install it once, as an admin:
 
 ```sh
-cd /Users/SWFactory/swfactory
-sudo cp orchestrator/deploy/local.factory.backup.plist /Library/LaunchDaemons/
+sudo cp /Users/SWFactory/swfactory/orchestrator/deploy/local.factory.backup.plist /Library/LaunchDaemons/
 sudo chown root:wheel /Library/LaunchDaemons/local.factory.backup.plist
 sudo chmod 644 /Library/LaunchDaemons/local.factory.backup.plist
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.backup.plist
