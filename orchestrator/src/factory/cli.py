@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from factory import attempts, brakes, cancel, db, doctor, enrolment, logs, pause, serve, state, stats
+from factory import attempts, backup, brakes, cancel, db, doctor, enrolment, logs, pause, serve, state, stats
 from factory.orchestrator import Settings
 
 DEFAULT_DB = Path.home() / ".factory" / "factory.db"
@@ -77,6 +77,7 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_parser(commands)
     pause.add_parser(commands)
     doctor.add_parser(commands)
+    backup.add_parser(commands)
     return parser
 
 
@@ -92,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         return pause.run(args)
     if args.command == "logs":
         return _logs(args)
+    if args.command == "backup":
+        return backup.run(args)
 
     try:
         conn = db.connect_readonly(args.db)

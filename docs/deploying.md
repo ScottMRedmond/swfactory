@@ -12,6 +12,7 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
 | Bare repos for checking and pushing bundles | `/Users/SWFactory/.factory/git/` |
 | Orchestrator log (JSON lines, rotated, 30 days) | `/Users/SWFactory/.factory/logs/` |
 | launchd's stdout and stderr (crashes before logging starts) | `/Users/SWFactory/.factory/launchd.log` |
+| Nightly database backups (the newest 14) | `/Users/SWFactory/.factory/backups/` |
 | GitHub App private key | `/Users/SWFactory/.factory/app-key.pem` |
 
 ## One-time setup
@@ -28,7 +29,15 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
    ```
 
 4. Put your laptop's public key in `/Users/SWFactory/.ssh/authorized_keys` (mode 600, owned by `SWFactory`), and check `ssh SWFactory@macmini` works before closing your existing session.
-5. Optional: install Tailscale to reach it away from home.
+5. Install Tailscale on the Mac mini and the laptop, signed in to the same tailnet. In the Tailscale admin console, turn off key expiry for the Mac mini, so it doesn't drop off the tailnet while you're away. Use Tailscale's own sign-in, not Tailscale SSH: sshd and its key-only rule stay the only way in.
+
+Check both ways in from the laptop, and that a password is refused:
+
+```sh
+ssh SWFactory@macmini true                          # at home
+ssh SWFactory@<tailnet name of the mac mini> true   # with the laptop off the home network, e.g. a phone hotspot
+ssh -o PubkeyAuthentication=no SWFactory@macmini    # must fail with "Permission denied (publickey)"
+```
 
 ### 2. Tools
 
@@ -51,7 +60,7 @@ Put `orchestrator/.venv/bin` on `SWFactory`'s `PATH` (in `~/.zprofile`), so `ssh
 
 ### 4. The GitHub App key
 
-Copy the App's private key to the Mac mini, then delete the downloaded copy from your laptop. The key must exist **only** here.
+Give the Mac mini a key of its own. On the App's settings page, **Generate a private key**: a GitHub App can have several, so this one is only ever used here, and can be revoked on its own if the Mac mini is lost, without touching any other key. Copy it to the Mac mini, then delete the downloaded copy from your laptop. The key must exist **only** here.
 
 ```sh
 scp app.private-key.pem SWFactory@macmini:.factory/app-key.pem
@@ -59,6 +68,12 @@ ssh SWFactory@macmini chmod 600 .factory/app-key.pem
 ```
 
 Note the App's id (on the App's settings page). It goes in the plist.
+
+`~/.factory` is mode 700, so only `SWFactory` can read the key, the database and its backups. A new macOS home folder is readable by the `staff` group, which every family account is in, so this matters. Check it from another family account (one that isn't an admin):
+
+```sh
+ls /Users/SWFactory/.factory    # must fail with "Permission denied"
+```
 
 ### 5. Claude Code, for reading usage
 
@@ -148,7 +163,7 @@ Deploy by hand, from a tag, never automatically from `main`.
 
 Runs in flight keep going on Actions during the restart. The orchestrator collects them when it comes back.
 
-If the plist itself changed, reinstall it (step 6, with `bootout` first):
+If a plist itself changed, reinstall it (step 6 for the orchestrator, [Backups](#backups) for `local.factory.backup`, with `bootout` first). The orchestrator's:
 
 ```sh
 sudo launchctl bootout system/local.factory.orchestrator
@@ -159,12 +174,16 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrato
 ## Rolling back
 
 - **Code:** `git checkout v<N-1>`, reinstall, kickstart.
-- **A bad migration:** before migrating, the orchestrator copies the database to `factory.db.before-v<N>`. Stop the job, put the copy back, and check out the previous tag:
+- **A bad migration:** before migrating, the orchestrator copies the database to `factory.db.before-v<N>`. Stop the job, put the copy back, and check out the previous tag. Stopping and starting the job needs your admin account; the copy must be made as `SWFactory`, so the file stays its own:
 
   ```sh
+  # as an admin
   sudo launchctl bootout system/local.factory.orchestrator
+  # as SWFactory
   cp ~/.factory/factory.db.before-v<N> ~/.factory/factory.db
+  rm -f ~/.factory/factory.db-wal ~/.factory/factory.db-shm
   git -C ~/swfactory checkout v<N-1>
+  # as an admin
   sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrator.plist
   ```
 
@@ -177,14 +196,38 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrato
 
 ## Backups
 
-Back up `/Users/SWFactory/.factory/` with Time Machine, or copy the database nightly with SQLite's backup command, which is safe while it runs:
+`factory backup` copies the database to `backups/factory-<date>.db` beside it (`~/.factory/backups/`) with SQLite's online backup, which is safe while the orchestrator runs, and deletes all but the newest 14 copies. A second launchd job, `orchestrator/deploy/local.factory.backup.plist`, runs it nightly at 03:30 as `SWFactory`. If the Mac mini is asleep then, launchd runs it when it wakes. Install it once, as an admin:
 
 ```sh
-sqlite3 ~/.factory/factory.db ".backup '/path/to/backups/factory-$(date +%F).db'"
+cd /Users/SWFactory/swfactory
+sudo cp orchestrator/deploy/local.factory.backup.plist /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/local.factory.backup.plist
+sudo chmod 644 /Library/LaunchDaemons/local.factory.backup.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.backup.plist
+sudo launchctl kickstart system/local.factory.backup   # one backup now, to check it
+ls ~SWFactory/.factory/backups/                         # today's copy
 ```
+
+If a night's copy is missing, look in `~/.factory/backup.log`. A missing or unreadable database fails the backup and leaves the old copies alone.
+
+These copies are on the same disk as the database. Turn on Time Machine too (for the whole disk, or at least `/Users/SWFactory/.factory/backups/`), so a copy also lives off the machine. Time Machine copying the live `factory.db` mid-write can catch it inconsistent; the dated copies are always whole.
+
+To restore one, stop the job, put it back, and start it again. As in [Rolling back](#rolling-back), the copy is made as `SWFactory`:
+
+```sh
+# as an admin
+sudo launchctl bootout system/local.factory.orchestrator
+# as SWFactory
+cp ~/.factory/backups/factory-<date>.db ~/.factory/factory.db
+rm -f ~/.factory/factory.db-wal ~/.factory/factory.db-shm
+# as an admin
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.factory.orchestrator.plist
+```
+
+If `factory.db` is lost while the job runs, the orchestrator starts a new, empty one, and each night's copy of it pushes out a good one. Restore within two weeks, or take the copies from Time Machine.
 
 Losing the database loses history and attempt counts, not work (see [State](orchestrator.md#state)). The App key can be regenerated from the App's settings page if it's lost; revoke the old one there too.
 
 ## Moving to another machine
 
-Stop the job, then copy `factory.db` and `app-key.pem` to the new machine and follow the one-time setup there. Nothing else is stateful: `git/` is rebuilt as needed and logs are just history.
+Stop the job, then copy `factory.db` (or last night's backup) to the new machine and follow the one-time setup there, generating the new machine its own App key (step 4). Revoke the old machine's key on the App's settings page once the new one is running. Nothing else is stateful: `git/` is rebuilt as needed and logs are just history.

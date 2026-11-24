@@ -12,9 +12,9 @@ On the family Mac mini (M2, 24 GB), which is on most of the time.
 - launchd starts it at boot and restarts it when it crashes.
 - The Mac mini may sleep. Runs happen on the runner, not the Mac mini, so a run in flight keeps going and its files wait on the runner; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
 - It is managed from the development laptop over SSH, with Tailscale if you need access from away from home.
-- Its state is backed up with Time Machine or a nightly copy.
+- Its database is copied nightly by `factory backup` (a second launchd job), and Time Machine takes the copies off the machine.
 
-The orchestrator is **one process and one SQLite file**, so moving it to a VM or another machine means copying that file and the App key.
+The orchestrator is **one process and one SQLite file**, so moving it to a VM or another machine means copying that file and giving the new machine its own App key.
 
 ## State
 
