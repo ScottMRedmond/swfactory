@@ -20,8 +20,18 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
 ### 1. The `SWFactory` user and SSH
 
 1. System Settings → Users & Groups: add a **Standard** user named `SWFactory`. Other family accounts must be non-admin, so they can't read its files.
-2. System Settings → General → Sharing: turn on **Remote Login**, allowed for `SWFactory` (and your own admin account).
-3. While passwords still work, put your laptop's public key on the Mac mini, and check it gets in:
+2. Lock the other accounts' home folders, so `SWFactory` can't read them. macOS creates home folders readable by every user. As an admin:
+
+   ```sh
+   for d in /Users/*; do
+     case "$(basename "$d")" in Shared|Guest|SWFactory) continue;; esac
+     sudo chmod 700 "$d"
+   done
+   ```
+
+   Change only the home folder, so no `-R`. Other users then can't use that account's Public folder or Drop Box. If someone relies on them, use `711` for that account instead: others can reach `Public` but can't list the home folder. A new account starts readable again, so run this for each one you add. `/Users/Shared` stays readable by everyone, so keep nothing personal there. Check external drives too: an exFAT drive, or one with **Ignore ownership on this volume** ticked, is readable by every user.
+3. System Settings → General → Sharing: turn on **Remote Login**, allowed for `SWFactory` (and your own admin account).
+4. While passwords still work, put your laptop's public key on the Mac mini, and check it gets in:
 
    ```sh
    ssh-copy-id SWFactory@macmini
@@ -29,18 +39,19 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
    ```
 
    Do the same for your admin account if you want to reach it over SSH: after the next step, an account with no key can only be used at the keyboard.
-4. Turn off password login for SSH. Add to `/etc/ssh/sshd_config.d/100-factory.conf`:
+5. Turn off password login for SSH. Add to `/etc/ssh/sshd_config.d/100-factory.conf`:
 
    ```
    PasswordAuthentication no
    KbdInteractiveAuthentication no
    ```
 
-5. Check from the laptop that the key gets in and a password is refused:
+6. Check from the laptop that the key gets in, a password is refused, and other homes are closed:
 
    ```sh
    ssh SWFactory@macmini true                          # succeeds
    ssh -o PubkeyAuthentication=no SWFactory@macmini    # must fail with "Permission denied (publickey)"
+   ssh SWFactory@macmini ls /Users/<name>              # for each other account: must fail with "Permission denied"
    ```
 
 SSH works on the home network only. There's no access from away: Tailscale is left for later, if it's ever needed.
