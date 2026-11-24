@@ -31,6 +31,8 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
        HostName <IP address>
    ```
 
+4. Check from the laptop: `ssh factory-pc hostname` prints `factory-pc`. Then pull the PC's power cable, plug it back in without pressing the power button, and check it answers `ssh factory-pc true` again once it has booted.
+
 ### 1. The `swfactory` user and SSH
 
 As your own account on the PC:
@@ -84,8 +86,9 @@ You develop on this PC, often with an agent working as you. Two things would let
 
   ```sh
   sudo systemctl disable --now docker.service docker.socket   # no root daemon
+  sudo rm -f /var/run/docker.sock                             # and no leftover socket
   dockerd-rootless-setuptool.sh install                       # as you, not with sudo
-  systemctl --user enable --now docker
+  systemctl --user enable docker                              # start it at boot
   sudo loginctl enable-linger "$USER"                         # keep it running when you're logged out
   docker context use rootless
   ```
@@ -282,7 +285,7 @@ sudo systemctl restart factory-orchestrator
 ```sh
 openssl rand -base64 32 > ~/.factory/restic-password
 cat > ~/.factory/restic.env <<'EOF'
-RESTIC_REPOSITORY=<repository, e.g. s3:https://s3.us-west-000.backblazeb2.com/<bucket>/factory>
+RESTIC_REPOSITORY=<repository>   # e.g. s3:https://s3.us-west-000.backblazeb2.com/BUCKET/factory
 RESTIC_PASSWORD_FILE=/home/swfactory/.factory/restic-password
 # The storage's credentials, e.g. AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 EOF
@@ -307,21 +310,11 @@ and as `swfactory`: `(set -a; . ~/.factory/restic.env; restic snapshots)` shows 
 
 If a night's backup is missing, `systemctl status factory-backup` shows whether it failed, and `sudo journalctl -u factory-backup` shows why. A missing or unreadable database fails the backup and leaves the old copies alone.
 
-To restore one, stop the service, put it back, and start it again. As in [Rolling back](#rolling-back), the copy is made as `swfactory`:
+To restore one, follow the bad-migration steps in [Rolling back](#rolling-back), copying `~/.factory/backups/factory-<date>.db` instead of `factory.db.before-v<N>`, and skipping the checkout. If the local copies are gone too, first get them back from restic, as `swfactory`:
 
 ```sh
-# as your own account
-sudo systemctl stop factory-orchestrator
-# as swfactory, from the local copies:
-cp ~/.factory/backups/factory-<date>.db ~/.factory/factory.db
-# or from the off-machine copies:
 (set -a; . ~/.factory/restic.env; restic restore latest --target /tmp/restore)
-cp /tmp/restore/home/swfactory/.factory/backups/factory-<date>.db ~/.factory/factory.db
-rm -rf /tmp/restore
-# then, either way:
-rm -f ~/.factory/factory.db-wal ~/.factory/factory.db-shm
-# as your own account
-sudo systemctl start factory-orchestrator
+ls /tmp/restore/home/swfactory/.factory/backups/     # copy one from here, then rm -rf /tmp/restore
 ```
 
 If `factory.db` is lost while the service runs, the orchestrator starts a new, empty one, and each night's copy of it pushes out a good one. Restore within two weeks from the local copies, or within 30 days from restic.
@@ -336,18 +329,12 @@ Stop the service, then copy `factory.db` (or last night's backup) to the new mac
 
 ### Taking it off the Mac mini (once)
 
+*Untested:* these steps haven't been run yet.
+
 The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`. This takes it off and keeps its database for the PC. It doesn't need the PC to be ready: until the PC's service starts, nothing reacts to trigger labels, and they wait on GitHub.
 
 1. **Let runs in flight finish.** As `SWFactory`: `factory pause`, then wait until `factory status` shows no runs in flight. Pausing stops dispatching but keeps collecting. A run still in flight when the orchestrator stops is only collected if the database reaches the PC within 7 days, while the runner keeps its files.
-2. **Keep the database.** As `SWFactory`: `factory backup`. Then from the laptop:
-
-   ```sh
-   scp SWFactory@macmini:.factory/backups/factory-<date>.db ~/factory-handover.db
-   chmod 600 ~/factory-handover.db
-   ```
-
-   It holds rendered tickets from private repos, so keep it private, and delete it once the PC is running. It's also paused, which step 1 stored in it.
-3. **Stop the jobs and remove them, so nothing starts at boot.** As an admin on the Mac mini:
+2. **Stop the jobs and remove them, so nothing starts at boot.** Do this before copying the database: a paused orchestrator still polls, so a trigger it picked up after the copy was made would be lost. As an admin on the Mac mini:
 
    ```sh
    sudo launchctl bootout system/local.factory.orchestrator
@@ -366,11 +353,19 @@ The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`
    ```
 
    If System Settings → General → Login Items & Extensions listed the factory's jobs under **Allow in the Background**, they're gone from there too. Restart the Mac mini and run the `launchctl print` checks again to be sure.
+3. **Keep the database.** As `SWFactory`: `factory backup`. Then from the laptop:
+
+   ```sh
+   scp SWFactory@macmini:.factory/backups/factory-<date>.db ~/factory-handover.db
+   chmod 600 ~/factory-handover.db
+   ```
+
+   It holds rendered tickets from private repos, so keep it private, and delete it once the PC is running. It's also paused, which step 1 stored in it.
 4. **Sign out Claude Code.** As `SWFactory`: `claude auth logout`.
 5. **Revoke the Mac mini's App key.** On the App's settings page, under **Private keys**, delete the key made for the Mac mini (match it by its creation date). Nothing uses it once the job is gone.
 6. **Delete the `SWFactory` user.** End any SSH sessions as `SWFactory` first. Then System Settings → Users & Groups → ⓘ next to `SWFactory` → **Delete User**, choosing **Delete the home folder**. That removes the key file, the database, its backups and the Claude login. Check: `id SWFactory` says there's no such user, and `/Users/SWFactory` is gone.
 7. **Tidy up, if you want:**
-   - Turn off **Remote Login** in Sharing if nothing else uses it, and remove `/etc/ssh/sshd_config.d/100-factory.conf` to allow password login again.
+   - Turn off **Remote Login** in Sharing if nothing else uses it.
    - `brew uninstall python@3.12` if nothing else uses it.
    - Leave the other family home folders at mode 700: it's harmless and keeps them private.
    - Time Machine still holds old copies of `SWFactory`'s home, App key included. The key is revoked, so they're harmless; delete those backups if you'd rather not keep them.

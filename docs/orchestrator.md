@@ -58,7 +58,7 @@ The orchestrator talks to runners only through the **Runner interface** (see [Ke
 
 On startup and on each poll, the orchestrator looks up every `dispatched` row, always asking the runner for the run's state first:
 
-- If the run has finished, it collects the files, however late. After a sleep, many runs are past 60 minutes and finished; they are collected normally.
+- If the run has finished, it collects the files, however late. After a long outage, many runs are past 60 minutes and finished; they are collected normally.
 - If the run is missing, or finished without files, the outcome is `failed`. A runner keeps a run's files for a limited time, so an orchestrator down longer than that finds them gone, and the normal attempts rule retries it.
 - Only if the run is *still running* 15 minutes past its task's timeout (for queueing and upload; see [Limits and brakes](#limits-and-brakes)), it cancels the run and records `timed_out`. The runner enforces the timeout itself too, so the limit holds even while the orchestrator is down. The limit lives in one place, the orchestrator's config, and travels in the dispatch.
 
@@ -88,7 +88,7 @@ When a human closes a ticket, spec or PR that has active rows, the orchestrator 
 
 `factory cancel <run>` cancels one in-flight run by hand (see [Limits and brakes](#limits-and-brakes)).
 
-**A PR closed while the orchestrator was down or asleep.** The full scan on startup or waking lists only open issues and PRs, so it finds a factory PR closed without merging only while its ticket (or spec) is still open: a missing PR whose ticket is open was closed by hand, while a merged PR closes its ticket. A PR closed while its ticket was closed too is skipped, and its workflow stays as it was; no call is made per closed ticket in the history.
+**A PR closed while the orchestrator was down.** The full scan on startup or after a gap lists only open issues and PRs, so it finds a factory PR closed without merging only while its ticket (or spec) is still open: a missing PR whose ticket is open was closed by hand, while a merged PR closes its ticket. A PR closed while its ticket was closed too is skipped, and its workflow stays as it was; no call is made per closed ticket in the history.
 
 ## Triggers
 
@@ -97,7 +97,7 @@ The orchestrator **polls** each enrolled repo about every 60 seconds for trigger
 - Nothing reaches into the home network: there are no webhooks, no public URL and no port forwarding.
 - Webhooks are deferred. A one-minute delay doesn't matter next to runs that take up to 45 minutes. The interval is fixed: no faster polling while a run is in flight.
 - **One call per repo per poll:** `GET /repos/{owner}/{repo}/issues?state=all&since=<cursor − 2 min>&sort=updated`, sent with the last ETag. It returns issues and PRs, so it finds new trigger labels and closed issues and PRs (for [Cancelling](#cancelling)) in one go. An idle repo answers 304, which doesn't count against the App's rate limit (at least 5,000 requests an hour per installation). Checking `dispatched` rows adds at most one call per run in flight. Adding a label does bump `updated_at` (tested). The list can lag the change by some seconds: a `since` query right after a label was added missed it, and the same query a minute later found it. The 2-minute overlap covers that.
-- **Catching up:** the cursor and ETag live in memory. On startup, and on waking (any gap of more than 5 minutes between polls), the orchestrator scans every open issue and PR instead, fetches fresh App tokens and a fresh usage reading, and then resumes the cheap poll. No trigger is lost while it's down or asleep, and the dispatch limits still apply, so a long sleep doesn't cause a burst.
+- **Catching up:** the cursor and ETag live in memory. On startup, and after a gap (more than 5 minutes between polls), the orchestrator scans every open issue and PR instead, fetches fresh App tokens and a fresh usage reading, and then resumes the cheap poll. No trigger is lost while it's down, and the dispatch limits still apply, so a long outage doesn't cause a burst.
 - **Errors:** each repo has its own backoff. On a 5xx or a network error, the wait between polls doubles, up to 15 minutes, and drops back to 60 seconds after one success. On a 403 or 429 rate limit, it waits as long as `Retry-After` or `x-ratelimit-reset` says. After 30 minutes of failures it logs an error and opens a [factory problem](#observability) issue.
 - On finding a trigger label, the orchestrator **inserts the row first, then removes the label**. A crash between the two leaves a duplicate trigger, not a lost one, and the next poll skips it because a `queued` or `dispatched` row already exists for that repo, task and ticket. Removing the label is also what makes "re-add the label" mean "run again".
 - **Who can trigger:** only people with triage access or higher can add labels, even on a public repo, so the label permission is the access check. The orchestrator doesn't check again, but records who added it as `triggered_by`.
@@ -447,7 +447,7 @@ The read commands only read. The three writing commands only write to SQLite, an
 ## Deploying
 
 - The orchestrator's code lives in the public factory repo (see [Code](software-factory.md#code)).
-- **Deploying the orchestrator** is by hand, from a tag: `git pull` the release, then `systemctl restart`. It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The enrolments and `factory-config.yml` it reads every 10 minutes are data, kept separate from the code it runs.
+- **Deploying the orchestrator** is by hand, from a tag: check out the release tag, reinstall, then `systemctl restart` (see [deploying.md](deploying.md#releasing-a-new-version)). It's never deployed automatically from `main`, because that would make the merge-then-redeploy rule in [The runner contract](software-factory.md#the-runner-contract) easy to break, and a bad merge would break the orchestrator unattended. The enrolments and `factory-config.yml` it reads every 10 minutes are data, kept separate from the code it runs.
 
 ## Open questions
 
