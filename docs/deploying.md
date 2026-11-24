@@ -29,15 +29,14 @@ The orchestrator is one process (`factory serve`) and one SQLite file. launchd r
    ```
 
 4. Put your laptop's public key in `/Users/SWFactory/.ssh/authorized_keys` (mode 600, owned by `SWFactory`), and check `ssh SWFactory@macmini` works before closing your existing session.
-5. Install Tailscale on the Mac mini and the laptop, signed in to the same tailnet. In the Tailscale admin console, turn off key expiry for the Mac mini, so it doesn't drop off the tailnet while you're away. Use Tailscale's own sign-in, not Tailscale SSH: sshd and its key-only rule stay the only way in.
+5. Check from the laptop that the key gets in and a password is refused:
 
-Check both ways in from the laptop, and that a password is refused:
+   ```sh
+   ssh SWFactory@macmini true                          # succeeds
+   ssh -o PubkeyAuthentication=no SWFactory@macmini    # must fail with "Permission denied (publickey)"
+   ```
 
-```sh
-ssh SWFactory@macmini true                          # at home
-ssh SWFactory@<tailnet name of the mac mini> true   # with the laptop off the home network, e.g. a phone hotspot
-ssh -o PubkeyAuthentication=no SWFactory@macmini    # must fail with "Permission denied (publickey)"
-```
+SSH works on the home network only. There's no access from away: Tailscale is left for later, if it's ever needed.
 
 ### 2. Tools
 

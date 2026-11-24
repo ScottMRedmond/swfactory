@@ -11,7 +11,7 @@ On the family Mac mini (M2, 24 GB), which is on most of the time.
 - It runs under a dedicated `SWFactory` macOS user, so other non-admin family accounts can't read its secrets.
 - launchd starts it at boot and restarts it when it crashes.
 - The Mac mini may sleep. Runs happen on the runner, not the Mac mini, so a run in flight keeps going and its files wait on the runner; only new triggers, collecting and the next dispatch wait until it wakes. There's no drain step before sleeping: to stop spending usage, remove trigger labels or stop the launchd job.
-- It is managed from the development laptop over SSH, with Tailscale if you need access from away from home.
+- It is managed from the development laptop over SSH, on the home network only. Access from away (e.g. Tailscale) is left for later.
 - Its database is copied nightly by `factory backup` (a second launchd job), and Time Machine takes the copies off the machine.
 
 The orchestrator is **one process and one SQLite file**, so moving it to a VM or another machine means copying that file and giving the new machine its own App key.
@@ -387,7 +387,7 @@ Brakes:
 - **Automated checks:** the runner runs the repo's `check` command after implement, and before and after review; a failing check after the agent fails the run (see [Runners](software-factory.md#runners)). Explore and auto-tickets make no commits and run no check. Implement also runs the check itself while it works. Today the prompts *ask* the agent to pass `npm run check`, but no workflow step enforces it.
 - **Automated review:** the existing review task, chained by the orchestrator: once per PR in implement-ticket, and once at the end in implement-spec.
 - **Human review:** unchanged. A human merges every PR.
-- **Manual pause:** `factory pause` stops dispatching across all repos and `factory resume` starts it again; the flag is kept in SQLite, so it survives a restart. While paused, the orchestrator still polls, collects, cancels and posts, and each held-back run's line in its status comment says "queued: factory paused". `factory cancel <run>` asks for one in-flight run to be cancelled. The CLI only writes the request to SQLite; the orchestrator acts on it on its next loop, within about a minute. All three work over SSH, from a phone through Tailscale too. Stopping the launchd job is no longer the only brake.
+- **Manual pause:** `factory pause` stops dispatching across all repos and `factory resume` starts it again; the flag is kept in SQLite, so it survives a restart. While paused, the orchestrator still polls, collects, cancels and posts, and each held-back run's line in its status comment says "queued: factory paused". `factory cancel <run>` asks for one in-flight run to be cancelled. The CLI only writes the request to SQLite; the orchestrator acts on it on its next loop, within about a minute. All three work over SSH. Stopping the launchd job is no longer the only brake.
 - **Per-repo pause:** `enabled: false` in the repo's `config.yml` (see [Enrolments](#enrolments)).
 
 **Queue order** is oldest first across all repos, with no priorities and no round-robin in v1. With `per_spec_concurrency` at 1, a spec takes one of the two slots, so the other keeps other work moving. To push something to the front, pause the factory or disable other repos for a while.
@@ -424,7 +424,7 @@ The daily cap and a usage pause never open one: they're the factory working as d
 
 **Down or asleep.** There's no alert in v1. A dead-man's switch would fire every time the Mac mini sleeps, which it is meant to do. If nothing seems to be happening, `factory status` shows when the last poll ran, and launchd restarts the orchestrator after a crash.
 
-**The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `SWFactory` user (password login off), e.g. `ssh SWFactory@macmini factory status`, from a phone too through Tailscale.
+**The CLI.** `factory` runs on the Mac mini and reads the SQLite file directly; there's no server. You reach it with key-only SSH as the `SWFactory` user (password login off), e.g. `ssh SWFactory@macmini factory status`.
 
 - `factory status`: whether the factory is paused, the latest usage reading and its age, today's count against the cap, runs in flight, the queue (oldest first, with why each is held), the last successful poll per repo, and open factory problems.
 - `factory runs`: the last 20 rows, filtered with `--repo`, `--ticket`, `--task`, `--outcome` and `--since`, or `--json`. `factory runs <id>` shows one row in full: dispatch, result, the check output's tail, the retry chain, and the log link.
