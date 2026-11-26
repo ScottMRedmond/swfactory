@@ -9,7 +9,7 @@ The orchestrator is written in **Python**. Its language is independent of the ta
 On the **factory PC**, a small Linux machine of its own (a Lenovo ThinkCentre M80q Tiny running Ubuntu Server), which is always on. It moved there from the family Mac mini; why is in [ADR 0002](adr/0002-orchestrator-on-a-linux-mini-pc.md).
 
 - It runs under a dedicated `swfactory` Linux user, whose home only it can read.
-- The same PC is the development machine, under the developer's own account. That account has no passwordless sudo and uses rootless Docker, so nothing working as the developer, agents included, can read the orchestrator's secrets. No agent runs on the PC: runs happen on the runner.
+- The same PC is the development machine, under the developer's own account. That account has no sudo at all (admin work is done as a separate `admin` account) and uses rootless Docker, so nothing working as the developer, agents included, can read the orchestrator's secrets. No factory run happens on the PC: runs happen on the runner.
 - systemd starts it at boot and restarts it when it crashes.
 - If the PC is off or the orchestrator is down, a run in flight keeps going on the runner and its files wait there; only new triggers, collecting and the next dispatch wait until it's back. To stop spending usage, `factory pause`, remove trigger labels or stop the service.
 - It is managed from the development laptop over SSH, on the home network only. Access from away (e.g. Tailscale) is left for later.
