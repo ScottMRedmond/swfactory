@@ -4,7 +4,7 @@ How to set up the orchestrator on the factory PC, release a new version, and rec
 
 **Not yet tested on the PC.** This runbook replaces the Mac mini one, which was tested on 2026-11-22. Steps marked *untested* are the ones most likely to need fixing on the first real deploy.
 
-The orchestrator is one process (`factory serve`) and one SQLite file. systemd runs it as the `swfactory` user, from `orchestrator/deploy/factory-orchestrator.service`. The same PC is the development machine, under your own account; [step 2](#2-your-own-account) keeps the two apart.
+The orchestrator is one process (`factory serve`) and one SQLite file. systemd runs it as the `swfactory` user, from `orchestrator/deploy/factory-orchestrator.service`. The same PC is the development machine, under your own account, and administered as a separate `admin` account; [step 2](#2-your-own-account) keeps the three apart.
 
 | What | Where |
 |---|---|
@@ -23,35 +23,40 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
 ### 0. The PC
 
 1. In the BIOS (F1 at power-on on a ThinkCentre): set **After Power Loss** to **Power On**, so it comes back after a power cut.
-2. Install **Ubuntu Server LTS** (24.04 or newer). Call the machine `factory-pc`, make your own account in the installer, and tick **Install OpenSSH server**. Ubuntu Server doesn't sleep and installs security updates by itself (`unattended-upgrades`).
-3. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`:
+2. Install **Ubuntu Server LTS** (24.04 or newer). Call the machine `factory-pc`, name the installer's account `admin`, and tick **Install OpenSSH server**. `admin` is the only account that can use `sudo`, and you never develop or run agents as it (see [step 2](#2-your-own-account)). Ubuntu Server doesn't sleep and installs security updates by itself (`unattended-upgrades`).
+3. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`. `User` is the development account you'll add in step 1, so plain `ssh factory-pc` and VS Code Remote-SSH use it:
 
    ```
    Host factory-pc
        HostName <IP address>
+       User <you>
+       ForwardAgent no
    ```
 
-4. Check from the laptop: `ssh factory-pc hostname` prints `factory-pc`. Then pull the PC's power cable, plug it back in without pressing the power button, and check it answers `ssh factory-pc true` again once it has booted.
+4. Check from the laptop: `ssh admin@factory-pc hostname` prints `factory-pc`. Then pull the PC's power cable, plug it back in without pressing the power button, and check it answers `ssh admin@factory-pc true` again once it has booted.
 
-### 1. The `swfactory` user and SSH
+### 1. The accounts and SSH
 
-As your own account on the PC:
+As `admin` on the PC:
 
-1. Add the user. It has no password, so it can only be reached with an SSH key:
+1. Add the `swfactory` user and your development account. Neither has a password, so they can only be reached with an SSH key, and neither is in the `sudo` group:
 
    ```sh
    sudo adduser --disabled-password --gecos "" swfactory
+   sudo adduser --disabled-password --gecos "" <you>
    sudo chmod 700 /home/*
    ```
 
    Ubuntu makes new homes readable by their own group only, but `700` makes sure. Run the `chmod` again for any user you add later.
-2. From the laptop, put your public key on both accounts and check they get in:
+2. From the laptop, put your public key on all three accounts and check they get in:
 
    ```sh
-   ssh-copy-id factory-pc                     # your own account, with its password
-   ssh -t factory-pc 'sudo install -d -m 700 -o swfactory -g swfactory /home/swfactory/.ssh &&
-     sudo install -m 600 -o swfactory -g swfactory ~/.ssh/authorized_keys /home/swfactory/.ssh/'
+   ssh-copy-id admin@factory-pc               # with admin's password
+   ssh -t admin@factory-pc 'for u in swfactory <you>; do
+     sudo install -d -m 700 -o $u -g $u /home/$u/.ssh &&
+     sudo install -m 600 -o $u -g $u ~/.ssh/authorized_keys /home/$u/.ssh/; done'
    ssh swfactory@factory-pc true
+   ssh factory-pc true
    ```
 
 3. Turn off password login for SSH. Add to `/etc/ssh/sshd_config.d/100-factory.conf`, then `sudo systemctl restart ssh`:
@@ -67,46 +72,67 @@ As your own account on the PC:
    ssh swfactory@factory-pc true                          # succeeds
    ssh -o PubkeyAuthentication=no swfactory@factory-pc    # must fail with "Permission denied (publickey)"
    ssh factory-pc ls /home/swfactory                      # must fail with "Permission denied"
+   ssh factory-pc ls /home/admin                          # must fail with "Permission denied"
    ```
 
 SSH works on the home network only. There's no access from away: Tailscale is left for later, if it's ever needed.
 
 ### 2. Your own account
 
-You develop on this PC, often with an agent working as you. Two things would let anything running as you read the App key, so neither is allowed:
+You develop on this PC as `<you>`, often with an agent working as you. Treat anything running as you as something that may be turned against you, for example by a prompt injection in an issue, a web page or a dependency. It can change any file you own, so it must have no way to become root or `swfactory`, and no way back to the laptop.
 
-- **Passwordless sudo.** The installer's account needs its password for `sudo`; keep it that way. Check:
+**No sudo, not even with a password.** An agent working as you could edit your `~/.bashrc` to catch your password the next time you typed `sudo`. So `<you>` isn't in the `sudo` group, and admin work is done as `admin`:
 
-  ```sh
-  sudo -k; sudo -n true                                   # must fail with "a password is required"
-  sudo grep -rs NOPASSWD /etc/sudoers /etc/sudoers.d      # only the swfactory rule from step 8, once it exists
-  ```
+- Reach `admin` only with a fresh `ssh admin@factory-pc` from the laptop, never with `su` or `ssh` from a shell of yours, which could be tampered with.
+- As `admin`, never run anything from your home: no scripts, checkouts or unit files from `/home/<you>`. This runbook only ever copies from `/home/swfactory/swfactory`, which is a release tag.
+- Every `sudo` in this runbook is run as `admin`, except `swfactory`'s one restart rule ([step 8](#8-let-swfactory-restart-its-own-service)).
 
-- **The `docker` group, or any root Docker daemon.** A container started through the system daemon can mount `/home/swfactory`. Use **rootless Docker** instead, which runs a daemon as you, with only your rights. *Untested here.* Install Docker Engine from Docker's apt repository (docs.docker.com → Install → Ubuntu), including `docker-ce-rootless-extras`, plus `uidmap`. Then:
+Check, as `admin`:
 
-  ```sh
-  sudo systemctl disable --now docker.service docker.socket   # no root daemon
-  sudo rm -f /var/run/docker.sock                             # and no leftover socket
-  dockerd-rootless-setuptool.sh install                       # as you, not with sudo
-  systemctl --user enable docker                              # start it at boot
-  sudo loginctl enable-linger "$USER"                         # keep it running when you're logged out
-  docker context use rootless
-  ```
+```sh
+sudo -l -U <you>                                        # "User <you> is not allowed to run sudo"
+sudo grep -rs NOPASSWD /etc/sudoers /etc/sudoers.d      # only the swfactory rule from step 8, once it exists
+```
 
-  Check:
+**No `docker` group, and no root Docker daemon.** A container started through the system daemon can mount `/home/swfactory`. Use **rootless Docker** instead, which runs a daemon as you, with only your rights. *Untested here.* As `admin`, install Docker Engine from Docker's apt repository (docs.docker.com → Install → Ubuntu), including `docker-ce-rootless-extras`, plus `uidmap`. Then:
 
-  ```sh
-  getent group docker                                          # no members after the last ":"
-  docker run --rm -v /home/swfactory:/h alpine ls /h           # must fail with "Permission denied"
-  ```
+```sh
+# as admin
+sudo systemctl disable --now docker.service docker.socket   # no root daemon
+sudo rm -f /var/run/docker.sock                             # and no leftover socket
+sudo loginctl enable-linger <you>                           # keep your daemon running when you're logged out
+# as <you>
+dockerd-rootless-setuptool.sh install
+systemctl --user enable docker                              # start it at boot
+docker context use rootless
+```
 
-  VS Code Dev Containers over Remote-SSH uses the `docker` command and its current context, so it picks up the rootless daemon.
+Check, as `<you>`:
+
+```sh
+getent group docker                                          # no members after the last ":"
+docker run --rm -v /home/swfactory:/h alpine ls /h           # must fail with "Permission denied"
+```
+
+VS Code Dev Containers over Remote-SSH uses the `docker` command and its current context, so it picks up the rootless daemon.
+
+**Nothing on the PC can reach back into the laptop.** An SSH connection doesn't let the PC in unless something is forwarded, so on the laptop:
+
+- Keep `ForwardAgent no` for `factory-pc` (step 0), and in VS Code's settings set `"remote.SSH.enableAgentForwarding": false`. With forwarding on, anything running as you on the PC can use your laptop's SSH keys while you're connected.
+- Don't use `ssh -R` (remote forwarding) or `-X` (X11) to the PC.
+- In System Settings → General → Sharing, turn off **Remote Login**, and **File Sharing** if you don't use it, and turn on the firewall (System Settings → Network → Firewall). The PC is on the same home network, so any service the laptop offers is open to it.
+
+One path remains: VS Code itself. Its server runs on the PC (or in the dev container), and VS Code warns that a compromised remote can use the connection to run code on your local machine. Keep VS Code updated, and run agents inside a dev container rather than straight on the host.
+
+**Limit what your credentials can reach.** An agent can use any GitHub credentials your account and its containers have, and Dev Containers passes Git credentials into the container. Use a fine-grained GitHub token limited to the repos you develop. Releases are deployed from tags by hand, so nothing an agent pushes reaches the orchestrator without you.
+
+**Check the repo before using it outside the container.** An agent can write files that run when you use the repo on the host: `.git/hooks/*`, `.vscode/tasks.json` and `settings.json`, and build or package scripts. Look at `git status` and `.git/hooks` first.
 
 Never put the App key, the production database or `swfactory`'s Claude login in your own account. To try the orchestrator while developing, use a separate test App and database.
 
 ### 3. Tools
 
-As your own account: `sudo apt install git python3 python3-venv restic`. Python 3.12 or newer is required: check `python3 --version`.
+As `admin`: `sudo apt install git python3 python3-venv restic`. Python 3.12 or newer is required: check `python3 --version`.
 
 ### 4. The code
 
@@ -164,7 +190,7 @@ The orchestrator runs `claude -p /usage` before dispatching, to apply the [usage
 
 ### 7. The systemd service
 
-As your own account. The unit file needs no editing: it reads the App's id and key path from `orchestrator.env`.
+As `admin`. The unit file needs no editing: it reads the App's id and key path from `orchestrator.env`.
 
 ```sh
 sudo cp /home/swfactory/swfactory/orchestrator/deploy/factory-orchestrator.service /etc/systemd/system/
@@ -195,7 +221,7 @@ ssh swfactory@factory-pc factory status
 
 ### 8. Let `swfactory` restart its own service
 
-`swfactory` isn't an admin. One sudo rule lets it restart the orchestrator, and nothing else, so releases don't need your account. As your own account:
+`swfactory` isn't an admin. One sudo rule lets it restart the orchestrator, and nothing else, so releases don't need `admin`. As `admin`:
 
 ```sh
 sudo visudo -f /etc/sudoers.d/factory
@@ -241,12 +267,12 @@ Deploy by hand, from a tag, never automatically from `main`.
    sudo /usr/bin/systemctl restart factory-orchestrator.service
    ```
 
-   The [sudo rule](#8-let-swfactory-restart-its-own-service) allows this one command without a password. Installing, enabling or stopping the service still needs your account.
+   The [sudo rule](#8-let-swfactory-restart-its-own-service) allows this one command without a password. Installing, enabling or stopping the service still needs `admin`.
 4. Check `factory status` and `factory logs` for the startup lines and the first poll.
 
 Runs in flight keep going on Actions during the restart. The orchestrator collects them when it comes back.
 
-If a unit file itself changed, copy it again as in step 7 (or [Backups](#backups) for the backup units), then, as your own account:
+If a unit file itself changed, copy it again as in step 7 (or [Backups](#backups) for the backup units), then, as `admin`:
 
 ```sh
 sudo systemctl daemon-reload
@@ -256,16 +282,16 @@ sudo systemctl restart factory-orchestrator
 ## Rolling back
 
 - **Code:** `git checkout v<N-1>`, reinstall, restart.
-- **A bad migration:** before migrating, the orchestrator copies the database to `factory.db.before-v<N>`. Stop the service, put the copy back, and check out the previous tag. Stopping and starting the service needs your account; the copy must be made as `swfactory`, so the file stays its own:
+- **A bad migration:** before migrating, the orchestrator copies the database to `factory.db.before-v<N>`. Stop the service, put the copy back, and check out the previous tag. Stopping and starting the service needs `admin`; the copy must be made as `swfactory`, so the file stays its own:
 
   ```sh
-  # as your own account
+  # as admin
   sudo systemctl stop factory-orchestrator
   # as swfactory
   cp ~/.factory/factory.db.before-v<N> ~/.factory/factory.db
   rm -f ~/.factory/factory.db-wal ~/.factory/factory.db-shm
   cd ~/swfactory && git checkout v<N-1> && orchestrator/.venv/bin/pip install ./orchestrator
-  # as your own account
+  # as admin
   sudo systemctl start factory-orchestrator
   ```
 
@@ -295,7 +321,7 @@ chmod 600 ~/.factory/restic-password ~/.factory/restic.env
 
 **Keep a copy of the restic password and the storage's credentials off the PC too**, in a password manager. Without them the off-machine copies can't be read, and the PC dying is the case they're for.
 
-Then install the units, as your own account:
+Then install the units, as `admin`:
 
 ```sh
 sudo cp /home/swfactory/swfactory/orchestrator/deploy/factory-backup.{service,timer} /etc/systemd/system/
@@ -362,7 +388,15 @@ The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`
 
    It holds rendered tickets from private repos, so keep it private, and delete it once the PC is running. It's also paused, which step 1 stored in it.
 4. **Sign out Claude Code.** As `SWFactory`: `claude auth logout`.
-5. **Revoke the Mac mini's App key.** On the App's settings page, under **Private keys**, delete the key made for the Mac mini (match it by its creation date). Nothing uses it once the job is gone.
+5. **Revoke the Mac mini's App key.** Nothing uses it once the job is gone. First get its fingerprint, as `SWFactory` (the key file is still there until step 6):
+
+   ```sh
+   openssl rsa -in ~/.factory/app-key.pem -pubout -outform DER | openssl sha256 -binary | openssl base64
+   ```
+
+   Then on github.com: profile picture → **Settings** → **Developer settings** (bottom of the sidebar) → **GitHub Apps** → **Edit** next to the App. On the **General** tab, near the bottom, **Private keys** lists each key's SHA256 fingerprint: delete the one that matches. (Not **Settings → Applications → Installed GitHub Apps**: that's where the App is installed, not its keys.)
+
+   GitHub won't delete an App's only key. If the Mac mini's is the only one, do the PC's [step 5](#5-the-github-app-key) first, then come back to this.
 6. **Delete the `SWFactory` user.** End any SSH sessions as `SWFactory` first. Then System Settings → Users & Groups → ⓘ next to `SWFactory` → **Delete User**, choosing **Delete the home folder**. That removes the key file, the database, its backups and the Claude login. Check: `id SWFactory` says there's no such user, and `/Users/SWFactory` is gone.
 7. **Tidy up, if you want:**
    - Turn off **Remote Login** in Sharing if nothing else uses it.
