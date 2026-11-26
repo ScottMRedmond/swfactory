@@ -4,7 +4,7 @@ How to set up the orchestrator on the factory PC, release a new version, and rec
 
 **Not yet tested on the PC.** This runbook replaces the Mac mini one, which was tested on 2026-11-22. Steps marked *untested* are the ones most likely to need fixing on the first real deploy.
 
-The orchestrator is one process (`factory serve`) and one SQLite file. systemd runs it as the `swfactory` user, from `orchestrator/deploy/factory-orchestrator.service`. The same PC is the development machine, under your own account, and administered as a separate `admin` account; [step 2](#2-your-own-account) keeps the three apart.
+The orchestrator is one process (`factory serve`) and one SQLite file. systemd runs it as the `swfactory` user, from `orchestrator/deploy/factory-orchestrator.service`. The same PC is the development machine, under your development account, `<you>`, and is administered as a separate `admin` account. [Steps 0–2](#0-the-pc) set up the three accounts and keep them apart.
 
 | What | Where |
 |---|---|
@@ -23,8 +23,8 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
 ### 0. The PC
 
 1. In the BIOS (F1 at power-on on a ThinkCentre): set **After Power Loss** to **Power On**, so it comes back after a power cut.
-2. Install **Ubuntu Server LTS** (24.04 or newer). Call the machine `factory-pc`, name the installer's account `admin`, and tick **Install OpenSSH server**. `admin` is the only account that can use `sudo`, and you never develop or run agents as it (see [step 2](#2-your-own-account)). Ubuntu Server doesn't sleep and installs security updates by itself (`unattended-upgrades`).
-3. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`. `User` is the development account you'll add in step 1, so plain `ssh factory-pc` and VS Code Remote-SSH use it:
+2. Install **Ubuntu Server LTS** (24.04 or newer). Call the machine `factory-pc`, name the installer's account `admin`, and tick **Install OpenSSH server**. `admin` is the only account that can use `sudo`, and you never develop or run agents as it (see [step 2](#2-your-development-account)). Ubuntu Server doesn't sleep and installs security updates by itself (`unattended-upgrades`).
+3. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`. `User` is your development account, `<you>`, which you'll add in step 1, so plain `ssh factory-pc` and VS Code Remote-SSH use it:
 
    ```
    Host factory-pc
@@ -39,7 +39,7 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
 
 As `admin` on the PC:
 
-1. Add the `swfactory` user and your development account. Neither has a password, so they can only be reached with an SSH key, and neither is in the `sudo` group:
+1. Add the `swfactory` user and `<you>`. Neither has a password, so they can only be reached with an SSH key, and neither is in the `sudo` group:
 
    ```sh
    sudo adduser --disabled-password --gecos "" swfactory
@@ -77,7 +77,7 @@ As `admin` on the PC:
 
 SSH works on the home network only. There's no access from away: Tailscale is left for later, if it's ever needed.
 
-### 2. Your own account
+### 2. Your development account
 
 You develop on this PC as `<you>`, often with an agent working as you. Treat anything running as you as something that may be turned against you, for example by a prompt injection in an issue, a web page or a dependency. It can change any file you own, so it must have no way to become root or `swfactory`, and no way back to the laptop.
 
@@ -85,9 +85,9 @@ You develop on this PC as `<you>`, often with an agent working as you. Treat any
 
 - Reach `admin` only with a fresh `ssh admin@factory-pc` from the laptop, never with `su` or `ssh` from a shell of yours, which could be tampered with.
 - As `admin`, never run anything from your home: no scripts, checkouts or unit files from `/home/<you>`. This runbook only ever copies from `/home/swfactory/swfactory`, which is a release tag.
-- Every `sudo` in this runbook is run as `admin`, except `swfactory`'s one restart rule ([step 8](#8-let-swfactory-restart-its-own-service)).
+- Every `sudo` on the PC is run as `admin`, except `swfactory`'s one restart rule ([step 8](#8-let-swfactory-restart-its-own-service)).
 
-Check, as `admin`:
+Check, as `admin` (*untested*: the exact message may differ):
 
 ```sh
 sudo -l -U <you>                                        # "User <you> is not allowed to run sudo"
@@ -116,19 +116,21 @@ docker run --rm -v /home/swfactory:/h alpine ls /h           # must fail with "P
 
 VS Code Dev Containers over Remote-SSH uses the `docker` command and its current context, so it picks up the rootless daemon.
 
-**Nothing on the PC can reach back into the laptop.** An SSH connection doesn't let the PC in unless something is forwarded, so on the laptop:
+**Nothing on the PC can reach back into the laptop.** An SSH connection doesn't let the PC in unless something is forwarded, so on the laptop (*untested*: check the settings' names when you get there):
 
-- Keep `ForwardAgent no` for `factory-pc` (step 0), and in VS Code's settings set `"remote.SSH.enableAgentForwarding": false`. With forwarding on, anything running as you on the PC can use your laptop's SSH keys while you're connected.
+- Keep `ForwardAgent no` for `factory-pc` ([step 0](#0-the-pc)), and in VS Code's settings set `"remote.SSH.enableAgentForwarding": false`. With forwarding on, anything running as you on the PC can use your laptop's SSH keys while you're connected.
 - Don't use `ssh -R` (remote forwarding) or `-X` (X11) to the PC.
 - In System Settings → General → Sharing, turn off **Remote Login**, and **File Sharing** if you don't use it, and turn on the firewall (System Settings → Network → Firewall). The PC is on the same home network, so any service the laptop offers is open to it.
 
-One path remains: VS Code itself. Its server runs on the PC (or in the dev container), and VS Code warns that a compromised remote can use the connection to run code on your local machine. Keep VS Code updated, and run agents inside a dev container rather than straight on the host.
+One path remains: VS Code itself. Its server runs on the PC (or in the dev container), and VS Code warns that a compromised remote can use the connection to run code on your local machine. Keep VS Code updated.
 
-**Limit what your credentials can reach.** An agent can use any GitHub credentials your account and its containers have, and Dev Containers passes Git credentials into the container. Use a fine-grained GitHub token limited to the repos you develop. Releases are deployed from tags by hand, so nothing an agent pushes reaches the orchestrator without you.
+**Run agents only inside a dev container**, never straight on the host as `<you>`.
+
+**Limit what your credentials can reach.** An agent can use any GitHub credentials `<you>` and its containers have: Dev Containers passes the Git credentials stored for `<you>` on the PC into the container. So the token you give `gh auth login` (or Git's credential helper) as `<you>` should be a fine-grained token limited to the repos you develop. Check, as `<you>`: `gh auth status` shows that token. Releases are deployed from tags by hand, so nothing an agent pushes reaches the orchestrator without you.
 
 **Check the repo before using it outside the container.** An agent can write files that run when you use the repo on the host: `.git/hooks/*`, `.vscode/tasks.json` and `settings.json`, and build or package scripts. Look at `git status` and `.git/hooks` first.
 
-Never put the App key, the production database or `swfactory`'s Claude login in your own account. To try the orchestrator while developing, use a separate test App and database.
+Never put the App key, the production database or `swfactory`'s Claude login in `<you>`. To try the orchestrator while developing, use a separate test App and database.
 
 ### 3. Tools
 
@@ -170,7 +172,7 @@ chmod 600 ~/.factory/orchestrator.env
 sed -i '2i set -a; . ~/.factory/orchestrator.env; set +a' ~/.bashrc
 ```
 
-`~/.factory` is mode 700, so only `swfactory` (and root) can read the key, the database and its backups. Check as your own account:
+`~/.factory` is mode 700, so only `swfactory` (and root) can read the key, the database and its backups. Check as `<you>`:
 
 ```sh
 ls /home/swfactory/.factory    # must fail with "Permission denied"
@@ -205,7 +207,7 @@ Check it's running:
 ```sh
 systemctl status factory-orchestrator     # active (running), and its pid
 factory status                            # as swfactory: last poll per repo, usage reading
-factory logs --follow
+factory logs --follow                     # as swfactory
 ```
 
 If it won't stay up, look in `sudo journalctl -u factory-orchestrator -n 50` first.
@@ -300,7 +302,7 @@ sudo systemctl restart factory-orchestrator
 ## Stopping it
 
 - To stop new work but keep collecting what's in flight: `factory pause`, then `factory resume`.
-- To stop the process: `sudo systemctl stop factory-orchestrator`, and `sudo systemctl disable factory-orchestrator` too if it should stay stopped after a reboot. Runs in flight keep going on Actions, and their files wait there (for 7 days) until it's back.
+- To stop the process, as `admin`: `sudo systemctl stop factory-orchestrator`, and `sudo systemctl disable factory-orchestrator` too if it should stay stopped after a reboot. Runs in flight keep going on Actions, and their files wait there (for 7 days) until it's back.
 
 ## Backups
 
@@ -357,7 +359,7 @@ Stop the service, then copy `factory.db` (or last night's backup) to the new mac
 
 *Untested:* these steps haven't been run yet.
 
-The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`. This takes it off and keeps its database for the PC. It doesn't need the PC to be ready: until the PC's service starts, nothing reacts to trigger labels, and they wait on GitHub.
+The orchestrator first ran on the family Mac mini, under launchd, as `SWFactory`. This takes it off and keeps its database for the PC. It doesn't need the PC's service to be running: until it starts, nothing reacts to trigger labels, and they wait on GitHub. But if the Mac mini's App key is the App's only one, step 5 needs the PC's key first (its [step 5](#5-the-github-app-key)).
 
 1. **Let runs in flight finish.** As `SWFactory`: `factory pause`, then wait until `factory status` shows no runs in flight. Pausing stops dispatching but keeps collecting. A run still in flight when the orchestrator stops is only collected if the database reaches the PC within 7 days, while the runner keeps its files.
 2. **Stop the jobs and remove them, so nothing starts at boot.** Do this before copying the database: a paused orchestrator still polls, so a trigger it picked up after the copy was made would be lost. As an admin on the Mac mini:
