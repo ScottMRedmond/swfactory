@@ -24,7 +24,15 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
 
 1. In the BIOS (F1 at power-on on a ThinkCentre): set **After Power Loss** to **Power On**, so it comes back after a power cut.
 2. Install **Ubuntu Server LTS** (24.04 or newer). Call the machine `factory-pc`, name the installer's account `admin`, and tick **Install OpenSSH server**. `admin` is the only account that can use `sudo`, and you never develop or run agents as it (see [step 2](#2-your-development-account)). Ubuntu Server doesn't sleep and installs security updates by itself (`unattended-upgrades`).
-3. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`. `User` is your development account, `<you>`, which you'll add in step 1, so plain `ssh factory-pc` and VS Code Remote-SSH use it:
+3. Let it reboot by itself when an update needs one, such as a new kernel. Otherwise the update is installed but not running until someone reboots. As `admin`, write `/etc/apt/apt.conf.d/52factory-upgrades`:
+
+   ```
+   Unattended-Upgrade::Automatic-Reboot "true";
+   Unattended-Upgrade::Automatic-Reboot-Time "04:30";
+   ```
+
+   04:30 is after the 03:30 [backup](#backups). The orchestrator comes back by itself after a reboot ([step 7](#7-the-systemd-service)), and runs in flight keep going on Actions. Check (*untested*): `sudo unattended-upgrade --dry-run --debug` runs without errors, and `/var/run/reboot-required` doesn't stay around for more than a day.
+4. Reserve its IP address in the router's DHCP settings, and give the laptop the name in `~/.ssh/config`. `User` is your development account, `<you>`, which you'll add in step 1, so plain `ssh factory-pc` and VS Code Remote-SSH use it:
 
    ```
    Host factory-pc
@@ -33,7 +41,7 @@ The orchestrator is one process (`factory serve`) and one SQLite file. systemd r
        ForwardAgent no
    ```
 
-4. Check from the laptop: `ssh admin@factory-pc hostname` prints `factory-pc`. Then pull the PC's power cable, plug it back in without pressing the power button, and check it answers `ssh admin@factory-pc true` again once it has booted.
+5. Check from the laptop: `ssh admin@factory-pc hostname` prints `factory-pc`. Then pull the PC's power cable, plug it back in without pressing the power button, and check it answers `ssh admin@factory-pc true` again once it has booted.
 
 ### 1. The accounts and SSH
 
@@ -66,13 +74,24 @@ As `admin` on the PC:
    KbdInteractiveAuthentication no
    ```
 
-4. Check from the laptop that the key gets in, a password is refused, and the homes are closed:
+4. Turn on the firewall, letting in only SSH from the home network. Allow SSH **before** enabling it, or the session you're in is cut off. `<home subnet>` is the network the router hands out, such as `192.168.1.0/24`:
+
+   ```sh
+   sudo ufw default deny incoming
+   sudo ufw default allow outgoing
+   sudo ufw allow from <home subnet> to any port 22 proto tcp
+   sudo ufw enable
+   ```
+
+   Nothing else on the PC needs to be reached from outside: the orchestrator only makes outgoing calls to GitHub, and dev servers are reached through VS Code's port forwarding, which runs over SSH.
+5. Check from the laptop that the key gets in, a password is refused, the homes are closed, and the firewall is on:
 
    ```sh
    ssh swfactory@factory-pc true                          # succeeds
    ssh -o PubkeyAuthentication=no swfactory@factory-pc    # must fail with "Permission denied (publickey)"
    ssh factory-pc ls /home/swfactory                      # must fail with "Permission denied"
    ssh factory-pc ls /home/admin                          # must fail with "Permission denied"
+   ssh -t admin@factory-pc sudo ufw status                # "Status: active", and only the port 22 rule
    ```
 
 SSH works on the home network only. There's no access from away: Tailscale is left for later, if it's ever needed.
@@ -84,6 +103,7 @@ You develop on this PC as `<you>`, often with an agent working as you. Treat any
 **No sudo, not even with a password.** An agent working as you could edit your `~/.bashrc` to catch your password the next time you typed `sudo`. So `<you>` isn't in the `sudo` group, and admin work is done as `admin`:
 
 - Reach `admin` only with a fresh `ssh admin@factory-pc` from the laptop, never with `su` or `ssh` from a shell of yours, which could be tampered with.
+- Reach `admin` from a terminal only, never with VS Code Remote-SSH. VS Code installs its server and your extensions in the account it connects to, so as `admin` every extension would run with `admin`'s sudo.
 - As `admin`, never run anything from your home: no scripts, checkouts or unit files from `/home/<you>`. This runbook only ever copies from `/home/swfactory/swfactory`, which is a release tag.
 - Every `sudo` on the PC is run as `admin`, except `swfactory`'s one restart rule ([step 8](#8-let-swfactory-restart-its-own-service)).
 
@@ -114,7 +134,15 @@ getent group docker                                          # no members after 
 docker run --rm -v /home/swfactory:/h alpine ls /h           # must fail with "Permission denied"
 ```
 
-VS Code Dev Containers over Remote-SSH uses the `docker` command and its current context, so it picks up the rootless daemon.
+`unattended-upgrades` only updates packages from Ubuntu's own archive, so it leaves Docker alone. To have Docker's security fixes installed the same way, as `admin`, add to `/etc/apt/apt.conf.d/52factory-upgrades` (from [step 0](#0-the-pc)):
+
+```
+Unattended-Upgrade::Origins-Pattern { "origin=Docker"; };
+```
+
+Check (*untested*: the origin's name is from Docker's `Release` file, so look there if it doesn't match): `sudo unattended-upgrade --dry-run --debug 2>&1 | grep -i docker` lists `origin=Docker` among the allowed origins.
+
+**A container that writes to a folder of yours should run as root inside it.** In rootless Docker, root in a container is `<you>` on the host, with no more rights than you have. Any other container user maps to one of your subordinate UIDs, such as 100999. Files that user writes to a bind-mounted folder (`docker run -v`) belong to that UID on the host, and `<you>` can't edit or delete them. If an image runs as another user, add `--user root`. Check, as `<you>`: `ls -ln` on the folder shows only your own UID.
 
 **Nothing on the PC can reach back into the laptop.** An SSH connection doesn't let the PC in unless something is forwarded, so on the laptop (*untested*: check the settings' names when you get there):
 
@@ -122,13 +150,13 @@ VS Code Dev Containers over Remote-SSH uses the `docker` command and its current
 - Don't use `ssh -R` (remote forwarding) or `-X` (X11) to the PC.
 - In System Settings → General → Sharing, turn off **Remote Login**, and **File Sharing** if you don't use it, and turn on the firewall (System Settings → Network → Firewall). The PC is on the same home network, so any service the laptop offers is open to it.
 
-One path remains: VS Code itself. Its server runs on the PC (or in the dev container), and VS Code warns that a compromised remote can use the connection to run code on your local machine. Keep VS Code updated.
+One path remains: VS Code itself. Its server runs on the PC, and VS Code warns that a compromised remote can use the connection to run code on your local machine. Keep VS Code updated.
 
-**Run agents only inside a dev container**, never straight on the host as `<you>`.
+**Agents run straight on the PC as `<you>`, with no dev container.** The accounts above are the boundary: an agent can't become root or `swfactory`, read the App key, or reach the laptop. A container would only protect `<you>`'s own files, such as your shell startup files, other checkouts and VS Code's settings and extensions on the PC, and this runbook already treats all of those as possibly tampered with. So keep nothing in `<you>` worth more than the code and the limited token below.
 
-**Limit what your credentials can reach.** An agent can use any GitHub credentials `<you>` and its containers have: Dev Containers passes the Git credentials stored for `<you>` on the PC into the container. So the token you give `gh auth login` (or Git's credential helper) as `<you>` should be a fine-grained token limited to the repos you develop. Check, as `<you>`: `gh auth status` shows that token. Releases are deployed from tags by hand, so nothing an agent pushes reaches the orchestrator without you.
+**Install development tools as `<you>`, without sudo.** Use installers that work in your home: [uv](https://docs.astral.sh/uv/) for Python, [mise](https://mise.jdx.dev/) or nvm for Node, and Claude Code's native installer. Use `apt install` as `admin` only for what has no user-level installer, from Ubuntu's archive, never from a script in your home.
 
-**Check the repo before using it outside the container.** An agent can write files that run when you use the repo on the host: `.git/hooks/*`, `.vscode/tasks.json` and `settings.json`, and build or package scripts. Look at `git status` and `.git/hooks` first.
+**Limit what your credentials can reach.** An agent can use any GitHub credentials `<you>` has. So the token you give `gh auth login` (or Git's credential helper) as `<you>` should be a fine-grained token limited to the repos you develop. Check, as `<you>`: `gh auth status` shows that token. Releases are deployed from tags by hand, so nothing an agent pushes reaches the orchestrator without you.
 
 Never put the App key, the production database or `swfactory`'s Claude login in `<you>`. To try the orchestrator while developing, use a separate test App and database.
 
